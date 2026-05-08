@@ -1,14 +1,15 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { existsSync, unlinkSync } from 'fs';
 import { promoteFeedbackRow } from '../index';
 
+const tempDbPaths: string[] = [];
+
 function makeDb(): { dbPath: string } {
-  // We need a real on-disk DB because better-sqlite3 wants a path.
-  // Tests use a tmp file that the OS cleans up.
-  const tmpdir = require('os').tmpdir();
-  const path = require('path');
-  const fs = require('fs');
-  const dbPath = path.join(tmpdir, `aios-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const dbPath = join(tmpdir(), `aios-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  tempDbPaths.push(dbPath);
   const db = new Database(dbPath);
   db.exec(`
     CREATE TABLE asc_feedback (
@@ -33,6 +34,13 @@ function makeDb(): { dbPath: string } {
   db.close();
   return { dbPath };
 }
+
+afterEach(() => {
+  while (tempDbPaths.length) {
+    const p = tempDbPaths.pop()!;
+    if (existsSync(p)) unlinkSync(p);
+  }
+});
 
 describe('promoteFeedbackRow', () => {
   it('creates issue, updates row to approved, stores URL', async () => {

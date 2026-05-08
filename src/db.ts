@@ -1312,27 +1312,12 @@ export function applyAscFeedbackSchemaIfMissing(): void {
     db.exec(sql);
   }
 
-  // 2026-05-08 issue-link migration: add github_issue_url column only if
-  // it doesn't exist. SQLite ALTER TABLE ADD COLUMN is not idempotent, so
-  // we PRAGMA-check first rather than catching the duplicate-column error.
-  try {
-    const cols = db.prepare(`PRAGMA table_info(asc_feedback)`).all() as { name: string }[];
-    const hasIssueUrl = cols.some((c) => c.name === 'github_issue_url');
-    if (!hasIssueUrl) {
-      const linkSqlPath = path.join(
-        PROJECT_ROOT,
-        'store',
-        'migrations',
-        '2026-05-08-asc-feedback-issue-link.sql',
-      );
-      if (fs.existsSync(linkSqlPath)) {
-        const linkSql = fs.readFileSync(linkSqlPath, 'utf8');
-        db.exec(linkSql);
-      }
-    }
-  } catch {
-    // PRAGMA can only fail if asc_feedback is missing entirely (sqlPath
-    // didn't exist above). In that case there's nothing to migrate.
+  // 2026-05-08 issue-link migration: add github_issue_url column. Reuses
+  // addColumnIfMissing() (PRAGMA-checks, tolerates the concurrent ALTER race).
+  // Skips silently if asc_feedback wasn't created (sqlPath above missing).
+  const ascCols = db.prepare(`PRAGMA table_info(asc_feedback)`).all() as Array<{ name: string }>;
+  if (ascCols.length > 0) {
+    addColumnIfMissing(db, 'asc_feedback', 'github_issue_url', 'TEXT');
   }
 }
 
