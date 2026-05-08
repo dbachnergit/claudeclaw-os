@@ -143,3 +143,92 @@ export async function synthesizeOperatingManual(
     ),
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Anthropic-backed ModelClient
+// ─────────────────────────────────────────────────────────────────────────
+
+// Lazy-imported so the test suite (which only uses the stub client) does
+// not need a real ANTHROPIC_API_KEY.
+async function buildAnthropicClient(): Promise<ModelClient> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey.trim().length === 0) {
+    throw new Error(
+      'ANTHROPIC_API_KEY is not set. Add it to ~/Projects/PatientScribe-AI-OS/.env before running extract-manual.'
+    );
+  }
+  const { default: Anthropic } = await import('@anthropic-ai/sdk');
+  const client = new Anthropic({ apiKey });
+
+  // Cache the large shared system context once. All five synthesis calls
+  // share the same system prompt; the Anthropic API will charge cache-write
+  // pricing on the first call and cache-read pricing on the four after.
+  return {
+    async complete(system: string, userPrompt: string): Promise<string> {
+      const message = await client.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4096,
+        system: [
+          {
+            type: 'text',
+            text: system,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [{ role: 'user', content: userPrompt }],
+      });
+      const text = message.content
+        .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+      return text;
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CLI entry point
+// ─────────────────────────────────────────────────────────────────────────
+
+async function main(): Promise<void> {
+  // Load .env from the AI OS repo root. Importing dotenv/config has a
+  // side effect of reading process.cwd()/.env, which is what we want
+  // when invoked via `npm run extract-manual`.
+  await import('dotenv/config');
+
+  const { homedir } = await import('os');
+  const { mkdirSync, writeFileSync } = await import('fs');
+
+  const home = homedir();
+  const paths = resolveSourcePaths(home);
+  const bundle = await collectContextBundle(paths);
+
+  if (bundle.missingSources.length) {
+    console.warn(
+      `Missing sources, manual will be thinner: ${bundle.missingSources.join(', ')}`
+    );
+  }
+
+  const client = await buildAnthropicClient();
+  const manual = await synthesizeOperatingManual(bundle, client);
+
+  const root = `${home}/Projects/PatientScribe/docs/operating-manual`;
+  mkdirSync(`${root}/context`, { recursive: true });
+  mkdirSync(`${root}/decisions`, { recursive: true });
+  mkdirSync(`${root}/references`, { recursive: true });
+
+  writeFileSync(`${root}/context/product.md`, manual.product);
+  writeFileSync(`${root}/context/customers.md`, manual.customers);
+  writeFileSync(`${root}/context/voice.md`, manual.voice);
+  writeFileSync(`${root}/connections.md`, manual.connections);
+  writeFileSync(`${root}/decisions/log.md`, manual.decisionsBackfill);
+
+  console.log(`Wrote draft manual to ${root}`);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
