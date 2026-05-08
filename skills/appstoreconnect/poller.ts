@@ -14,10 +14,14 @@ export interface PollResult {
 }
 
 export async function runPollOnce(opts: PollOptions): Promise<PollResult> {
-  const { db, client } = opts;
+  const { db, client, appId } = opts;
   const errors: string[] = [];
   let inserted = 0;
   let skipped = 0;
+  if (!appId) {
+    errors.push('config: ASC_APP_ID is not set; skip poll');
+    return { inserted, skipped, errors };
+  }
   const insert = db.prepare(`
     INSERT OR IGNORE INTO asc_feedback
       (asc_id, type, tester_id, build_version, text, screenshots_json, raw_json, status, received_at, fetched_at)
@@ -25,8 +29,8 @@ export async function runPollOnce(opts: PollOptions): Promise<PollResult> {
   `);
 
   const sources: Array<{ kind: string; load: () => Promise<AscResource[]>; type: string }> = [
-    { kind: 'feedback', load: () => client.listBetaFeedback(), type: 'testflight_feedback' },
-    { kind: 'crash', load: () => client.listBetaCrashFeedback(), type: 'testflight_crash' },
+    { kind: 'feedback', load: () => client.listBetaFeedback(appId), type: 'testflight_feedback' },
+    { kind: 'crash', load: () => client.listBetaCrashFeedback(appId), type: 'testflight_crash' },
   ];
 
   for (const src of sources) {

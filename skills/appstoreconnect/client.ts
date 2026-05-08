@@ -33,13 +33,18 @@ export class AscClient {
     return (await res.json()) as T;
   }
 
-  async listBetaFeedback(): Promise<AscResource[]> {
-    const json = await this.getJson<{ data: AscResource[] }>('/betaFeedbackScreenshotSubmissions');
+  // Apple's API does NOT permit GET_COLLECTION on the top-level
+  // /v1/betaFeedback{Screenshot,Crash}Submissions resources — only
+  // GET_INSTANCE and DELETE. Collection access requires the nested
+  // /v1/apps/{id}/... path. The original Phase 2 plan pre-dated this
+  // restriction; verified empirically against the live API on 2026-05-08.
+  async listBetaFeedback(appId: string): Promise<AscResource[]> {
+    const json = await this.getJson<{ data: AscResource[] }>(`/apps/${appId}/betaFeedbackScreenshotSubmissions`);
     return json.data;
   }
 
-  async listBetaCrashFeedback(): Promise<AscResource[]> {
-    const json = await this.getJson<{ data: AscResource[] }>('/betaFeedbackCrashSubmissions');
+  async listBetaCrashFeedback(appId: string): Promise<AscResource[]> {
+    const json = await this.getJson<{ data: AscResource[] }>(`/apps/${appId}/betaFeedbackCrashSubmissions`);
     return json.data;
   }
 
