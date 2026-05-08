@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   collectContextBundle,
   resolveSourcePaths,
+  stripCodeFenceWrapper,
   synthesizeOperatingManual,
 } from '../auto-extract-manual';
 import { writeFileSync, mkdirSync, mkdtempSync } from 'fs';
@@ -42,6 +43,28 @@ describe('collectContextBundle', () => {
     expect(bundle.missingSources).toEqual(
       expect.arrayContaining(['autoMemoryDir', 'vaultStrategyGlob', 'recentPlans'])
     );
+  });
+});
+
+describe('stripCodeFenceWrapper', () => {
+  it('strips a single outer ```markdown fence', () => {
+    const wrapped = '```markdown\n# Hello\n\nBody text.\n```';
+    expect(stripCodeFenceWrapper(wrapped)).toBe('# Hello\n\nBody text.\n');
+  });
+
+  it('strips a bare ``` fence', () => {
+    const wrapped = '```\n# Hello\n```';
+    expect(stripCodeFenceWrapper(wrapped)).toBe('# Hello\n');
+  });
+
+  it('leaves un-fenced content unchanged', () => {
+    const plain = '# Hello\n\nBody text.\n';
+    expect(stripCodeFenceWrapper(plain)).toBe(plain);
+  });
+
+  it('does not strip an inner fence in regular markdown', () => {
+    const inner = '# Title\n\n```ts\nconst x = 1;\n```\n';
+    expect(stripCodeFenceWrapper(inner)).toBe(inner);
   });
 });
 

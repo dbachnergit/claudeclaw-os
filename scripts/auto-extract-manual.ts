@@ -93,6 +93,17 @@ export interface OperatingManual {
   decisionsBackfill: string;
 }
 
+export function stripCodeFenceWrapper(raw: string): string {
+  // Models occasionally wrap a "markdown only" response in ```markdown ... ```
+  // even when the prompt says not to. Strip a single outer fence if present.
+  const opener = /^[ \t]*```[a-zA-Z]*\n/;
+  const closer = /\n[ \t]*```[ \t]*\n?$/;
+  if (opener.test(raw) && closer.test(raw)) {
+    return raw.replace(opener, '').replace(closer, '\n');
+  }
+  return raw;
+}
+
 function buildBaseContext(bundle: ContextBundle): string {
   return [
     bundle.projectClaudeMd ? `## CLAUDE.md\n${bundle.projectClaudeMd}` : '',
@@ -114,11 +125,13 @@ export async function synthesizeOperatingManual(
 ): Promise<OperatingManual> {
   const baseContext = buildBaseContext(bundle);
 
-  const ask = (file: string, instruction: string) =>
-    client.complete(
+  const ask = async (file: string, instruction: string) => {
+    const raw = await client.complete(
       baseContext,
       `Write ${file}. ${instruction}\nOutput markdown only.`
     );
+    return stripCodeFenceWrapper(raw);
+  };
 
   return {
     product: await ask(
