@@ -13,4 +13,17 @@ export function applySchema(db: Database.Database): void {
     'utf8'
   );
   db.exec(sql);
+
+  // 2026-05-08 issue-link migration: add github_issue_url column only if
+  // it doesn't exist. SQLite ALTER TABLE ADD COLUMN is not idempotent, so
+  // we PRAGMA-check before applying.
+  const cols = db.prepare(`PRAGMA table_info(asc_feedback)`).all() as { name: string }[];
+  const hasIssueUrl = cols.some((c) => c.name === 'github_issue_url');
+  if (!hasIssueUrl) {
+    const linkSql = readFileSync(
+      join(here, '..', '..', 'store', 'migrations', '2026-05-08-asc-feedback-issue-link.sql'),
+      'utf8'
+    );
+    db.exec(linkSql);
+  }
 }

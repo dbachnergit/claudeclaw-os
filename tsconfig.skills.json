@@ -7,6 +7,6 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "include": ["skills/appstoreconnect/index.ts", "skills/appstoreconnect/schema.ts", "skills/appstoreconnect/jwt.ts", "skills/appstoreconnect/client.ts", "skills/appstoreconnect/poller.ts", "skills/github-issues/labels.ts", "skills/github-issues/promote.ts"],
+  "include": ["skills/appstoreconnect/index.ts", "skills/appstoreconnect/schema.ts", "skills/appstoreconnect/jwt.ts", "skills/appstoreconnect/client.ts", "skills/appstoreconnect/poller.ts", "skills/github-issues/labels.ts", "skills/github-issues/promote.ts", "skills/github-issues/index.ts"],
   "exclude": ["node_modules", "dist", "**/tests/**", "**/*.test.ts"]
 }

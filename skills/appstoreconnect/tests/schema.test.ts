@@ -16,6 +16,7 @@ describe('asc-feedback schema', () => {
       'asc_id',
       'build_version',
       'fetched_at',
+      'github_issue_url',
       'id',
       'raw_json',
       'received_at',
