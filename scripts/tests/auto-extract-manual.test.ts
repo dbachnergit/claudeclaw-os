@@ -1,13 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import {
   collectContextBundle,
   resolveSourcePaths,
   stripCodeFenceWrapper,
   synthesizeOperatingManual,
 } from '../auto-extract-manual';
-import { writeFileSync, mkdirSync, mkdtempSync } from 'fs';
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+
+const tempHomes: string[] = [];
+afterEach(() => {
+  while (tempHomes.length) {
+    const dir = tempHomes.pop()!;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe('auto-extract-manual config', () => {
   it('returns absolute paths to all known PatientScribe context sources', () => {
@@ -23,11 +31,19 @@ describe('auto-extract-manual config', () => {
     );
     expect(paths.recentPlans).toBe(`${home}/Projects/PatientScribe/docs/Plans`);
   });
+
+  it('derives the auto-memory slug from home rather than hardcoding it', () => {
+    const paths = resolveSourcePaths('/Users/alice');
+    expect(paths.autoMemoryDir).toBe(
+      '/Users/alice/.claude/projects/-Users-alice-Projects-PatientScribe/memory'
+    );
+  });
 });
 
 describe('collectContextBundle', () => {
   it('reads each available source and returns a structured bundle', async () => {
     const home = mkdtempSync(join(tmpdir(), 'aios-extract-'));
+    tempHomes.push(home);
     mkdirSync(`${home}/Projects/PatientScribe/docs`, { recursive: true });
     writeFileSync(`${home}/Projects/PatientScribe/CLAUDE.md`, '# Project handbook\nMission: X');
     writeFileSync(

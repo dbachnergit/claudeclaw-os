@@ -72,11 +72,5 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "vitest": {
-    "environment": "node",
-    "include": [
-      "src/**/*.test.ts"
-    ]
   }
 }

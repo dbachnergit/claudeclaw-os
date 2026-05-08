@@ -15,11 +15,21 @@ export interface SourcePaths {
   recentPlans: string;
 }
 
+// Claude Code namespaces a project's auto-memory under
+// ~/.claude/projects/<slug>/memory, where <slug> is the project's
+// absolute path with every "/" replaced by "-" (the leading dash
+// from the absolute path is preserved). Derive it from `home` so the
+// script keeps working if the user's home directory changes or the
+// project moves.
+function autoMemorySlug(home: string): string {
+  return `${home}/Projects/PatientScribe`.replace(/\//g, '-');
+}
+
 export function resolveSourcePaths(home: string): SourcePaths {
   return {
     projectClaudeMd: `${home}/Projects/PatientScribe/CLAUDE.md`,
     brandFoundation: `${home}/Projects/PatientScribe/docs/BrandFoundation.md`,
-    autoMemoryDir: `${home}/.claude/projects/-Users-dbachner-Projects-PatientScribe/memory`,
+    autoMemoryDir: `${home}/.claude/projects/${autoMemorySlug(home)}/memory`,
     vaultStrategyGlob: `${home}/vault/projects/PatientScribe/STRATEGY_*.md`,
     recentPlans: `${home}/Projects/PatientScribe/docs/Plans`,
   };
@@ -50,8 +60,14 @@ export async function collectContextBundle(paths: SourcePaths): Promise<ContextB
       missing.push(key);
       return [];
     }
+    // Sort ascending so a downstream `.slice(-15)` returns the most
+    // recent entries. Plans in this repo are date-prefixed
+    // (YYYY-MM-DD-...), so ascending lexical order matches ascending
+    // chronological order. For the auto-memory dir the order does not
+    // matter because all entries are concatenated.
     return readdirSync(dir)
       .filter((f) => f.endsWith('.md'))
+      .sort()
       .map((f) => ({ path: `${dir}/${f}`, content: readFileSync(`${dir}/${f}`, 'utf8') }));
   };
 
