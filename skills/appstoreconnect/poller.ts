@@ -34,9 +34,8 @@ export async function runPollOnce(opts: PollOptions): Promise<PollResult> {
       const items = await src.load();
       for (const item of items) {
         const a = (item.attributes as any) ?? {};
-        const receivedAt = a.createdDate
-          ? Math.floor(new Date(a.createdDate).getTime() / 1000)
-          : Math.floor(Date.now() / 1000);
+        const parsed = a.createdDate ? Math.floor(new Date(a.createdDate).getTime() / 1000) : NaN;
+        const receivedAt = Number.isFinite(parsed) ? parsed : Math.floor(Date.now() / 1000);
         const fetchedAt = Math.floor(Date.now() / 1000);
         const result = insert.run(
           item.id,

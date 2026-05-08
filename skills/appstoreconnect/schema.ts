@@ -3,6 +3,8 @@ import { readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
+// Resolves to <project-root>/store/migrations/. schema.ts must remain
+// two directory levels below the project root for this path to be correct.
 const here = dirname(fileURLToPath(import.meta.url));
 
 export function applySchema(db: Database.Database): void {

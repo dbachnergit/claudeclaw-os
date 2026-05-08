@@ -4,6 +4,7 @@ import { generateKeyPair, exportPKCS8 } from 'jose';
 
 describe('signAscJwt', () => {
   it('returns a JWS with iss/iat/exp/aud claims', async () => {
+    // jose v6: extractable must be true to allow exportPKCS8 in test setup
     const { privateKey } = await generateKeyPair('ES256', { extractable: true });
     const pem = await exportPKCS8(privateKey);
     const creds: AscCredentials = {
