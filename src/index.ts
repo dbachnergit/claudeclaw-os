@@ -339,6 +339,12 @@ async function main(): Promise<void> {
         }>;
       };
       const { pollAscNow } = ascSkill;
+      // ClaudeClaw's readEnvFile is the source of truth for .env values —
+      // process.env is intentionally not populated to keep secrets out of
+      // child processes. Read the ASC vars on each fire so a manual .env
+      // edit (e.g. rotated key) takes effect on the next interval without
+      // a full restart.
+      const { readEnvFile } = await import('./env.js');
       let ascConsecutiveFailures = 0;
       let ascPaused = false;
       const ascDbPath = path.join(STORE_DIR, 'claudeclaw.db');
@@ -349,7 +355,16 @@ async function main(): Promise<void> {
       const runAscPoll = async (): Promise<void> => {
         if (ascPaused) return;
         try {
-          const result = await pollAscNow(process.env, ascDbPath);
+          const ascEnv = readEnvFile([
+            'ANTHROPIC_API_KEY',
+            'ASC_ISSUER_ID',
+            'ASC_KEY_ID',
+            'ASC_PRIVATE_KEY_PATH',
+            'ASC_APP_ID',
+            'GITHUB_OWNER',
+            'GITHUB_REPO',
+          ]);
+          const result = await pollAscNow(ascEnv as NodeJS.ProcessEnv, ascDbPath);
           if (result.errors.length === 0) {
             ascConsecutiveFailures = 0;
             logger.info(
