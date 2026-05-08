@@ -375,7 +375,7 @@ async function main(): Promise<void> {
           await bot.api
             .sendMessage(
               ALLOWED_CHAT_ID,
-              `App Store Connect poll failed ${ASC_FAILURE_THRESHOLD} times in a row. Polling paused until the bot is restarted. Check ~/Library/Logs/aios.out.log for details.`,
+              `App Store Connect poll failed ${ASC_FAILURE_THRESHOLD} times in a row. Polling paused until the bot is restarted. Check /tmp/claudeclaw.err for details.`,
             )
             .catch((err: unknown) => logger.error({ err }, 'Failed to send ASC pause alert'));
         }

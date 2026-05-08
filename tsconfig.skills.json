@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./skills",
+    "outDir": "./skills",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["skills/appstoreconnect/index.ts", "skills/appstoreconnect/schema.ts", "skills/appstoreconnect/jwt.ts", "skills/appstoreconnect/client.ts", "skills/appstoreconnect/poller.ts"],
+  "exclude": ["node_modules", "dist", "**/tests/**", "**/*.test.ts"]
+}

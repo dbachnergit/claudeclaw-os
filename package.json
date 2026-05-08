@@ -7,9 +7,9 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "dev:web": "vite",
-    "build": "vite build && tsc",
+    "build": "vite build && tsc && tsc -p tsconfig.skills.json",
     "build:web": "vite build",
-    "build:server": "tsc",
+    "build:server": "tsc && tsc -p tsconfig.skills.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

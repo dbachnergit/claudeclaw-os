@@ -4,6 +4,13 @@ node_modules/
 # Build output
 dist/
 
+# Skills compiled in-place (tsconfig.skills.json emits .js next to .ts).
+# Only .ts is the source of truth.
+skills/**/*.js
+skills/**/*.d.ts
+skills/**/*.js.map
+skills/**/*.d.ts.map
+
 # Environment — never commit API keys
 .env
 

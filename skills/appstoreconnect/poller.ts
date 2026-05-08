@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { AscClient, AscResource } from './client';
+import type { AscClient, AscResource } from './client.js';
 
 export interface PollOptions {
   db: Database.Database;
