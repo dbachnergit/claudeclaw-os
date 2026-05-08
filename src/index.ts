@@ -312,6 +312,72 @@ async function main(): Promise<void> {
         }
       }
     }
+
+    // App Store Connect feedback poll. Runs every 30 min in the main process,
+    // first run after a 2 min settle delay. Three consecutive failures pause
+    // polling for the rest of this process lifetime and send one Telegram
+    // alert. The poller itself never throws — its return shape carries an
+    // errors[] array. We treat a non-empty errors[] OR a thrown exception as
+    // a failure for the strike counter.
+    if (ALLOWED_CHAT_ID) {
+      // Dynamic import via a runtime-computed specifier. Bypasses TS rootDir
+      // checking because the path is not a string literal at compile time.
+      // The skill lives outside src/ on purpose (skill manifest convention).
+      const ascSkillPath = '../skills/appstoreconnect/index.js';
+      const ascSkill = (await import(ascSkillPath)) as {
+        pollAscNow: (env: NodeJS.ProcessEnv, dbPath: string) => Promise<{
+          inserted: number;
+          skipped: number;
+          errors: unknown[];
+        }>;
+      };
+      const { pollAscNow } = ascSkill;
+      let ascConsecutiveFailures = 0;
+      let ascPaused = false;
+      const ascDbPath = path.join(STORE_DIR, 'claudeclaw.db');
+      const ASC_FAILURE_THRESHOLD = 3;
+      const ASC_INTERVAL_MS = 30 * 60 * 1000;
+      const ASC_INITIAL_DELAY_MS = 2 * 60 * 1000;
+
+      const runAscPoll = async (): Promise<void> => {
+        if (ascPaused) return;
+        try {
+          const result = await pollAscNow(process.env, ascDbPath);
+          if (result.errors.length === 0) {
+            ascConsecutiveFailures = 0;
+            logger.info(
+              { inserted: result.inserted, skipped: result.skipped },
+              'ASC poll completed',
+            );
+          } else {
+            ascConsecutiveFailures++;
+            logger.warn(
+              { errors: result.errors, consecutiveFailures: ascConsecutiveFailures },
+              'ASC poll completed with errors',
+            );
+          }
+        } catch (err) {
+          ascConsecutiveFailures++;
+          logger.error(
+            { err, consecutiveFailures: ascConsecutiveFailures },
+            'ASC poll threw',
+          );
+        }
+        if (ascConsecutiveFailures >= ASC_FAILURE_THRESHOLD && !ascPaused) {
+          ascPaused = true;
+          await bot.api
+            .sendMessage(
+              ALLOWED_CHAT_ID,
+              `App Store Connect poll failed ${ASC_FAILURE_THRESHOLD} times in a row. Polling paused until the bot is restarted. Check ~/Library/Logs/aios.out.log for details.`,
+            )
+            .catch((err: unknown) => logger.error({ err }, 'Failed to send ASC pause alert'));
+        }
+      };
+
+      setTimeout(() => void runAscPoll(), ASC_INITIAL_DELAY_MS);
+      setInterval(() => void runAscPoll(), ASC_INTERVAL_MS);
+      logger.info('App Store Connect poll enabled (every 30 min)');
+    }
   }
 
   if (ALLOWED_CHAT_ID) {
