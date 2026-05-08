@@ -18,12 +18,21 @@ const defaultExec = (cmd: string, args: string[]): Promise<{ stdout: string; std
     const p = spawn(cmd, args);
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const settle = (result: { stdout: string; stderr: string; code: number }) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
     p.stdout.on('data', (d) => (stdout += d.toString()));
     p.stderr.on('data', (d) => (stderr += d.toString()));
-    p.on('close', (code) => resolve({ stdout, stderr, code: code ?? 0 }));
-    // ENOENT (e.g. gh not installed) emits 'error' without 'close'. Convert
-    // that into a non-zero result so promoteToIssue throws instead of hanging.
-    p.on('error', (err) => resolve({ stdout, stderr: err.message, code: 1 }));
+    // null exit code means the process was killed by signal (SIGKILL/SIGTERM);
+    // treat that as failure (1), not success (0).
+    p.on('close', (code) => settle({ stdout, stderr, code: code ?? 1 }));
+    // ENOENT (e.g. gh not installed) emits 'error' without 'close'. EPERM and
+    // some platform-specific errors can race 'close' and 'error'; the settled
+    // flag ensures we resolve exactly once.
+    p.on('error', (err) => settle({ stdout, stderr: err.message, code: 1 }));
   });
 
 export async function promoteToIssue(input: PromoteInput): Promise<string> {
