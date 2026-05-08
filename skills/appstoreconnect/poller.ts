@@ -41,10 +41,17 @@ export async function runPollOnce(opts: PollOptions): Promise<PollResult> {
         const parsed = a.createdDate ? Math.floor(new Date(a.createdDate).getTime() / 1000) : NaN;
         const receivedAt = Number.isFinite(parsed) ? parsed : Math.floor(Date.now() / 1000);
         const fetchedAt = Math.floor(Date.now() / 1000);
+        // Apple's actual fields differ from the original Phase 2 plan:
+        // - tester email is `email` on betaFeedback{Screenshot,Crash}Submissions
+        //   attributes, not `testerEmail`.
+        // - There is NO `buildVersion` on these resources. The build version
+        //   label is reachable via `relationships.build` -> a separate
+        //   /v1/builds/{id} fetch (or ?include=build). Marked as a Phase 2
+        //   follow-up; for now we leave build_version empty when absent.
         const result = insert.run(
           item.id,
           src.type,
-          a.testerEmail ?? a.testerId ?? 'unknown',
+          a.email ?? a.testerEmail ?? a.testerId ?? 'unknown',
           a.buildVersion ?? 'unknown',
           a.comment ?? a.text ?? '',
           JSON.stringify(a.screenshots ?? []),

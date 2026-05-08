@@ -44,6 +44,18 @@ describe('runPollOnce', () => {
     expect(row.text).toBe('good app');
   });
 
+  it('reads tester email from Apple\'s "email" attribute (not "testerEmail")', async () => {
+    // Apple's actual betaFeedbackScreenshotSubmissions response uses `email`
+    // on the attributes object, not `testerEmail` as the original plan assumed.
+    const rows = [{
+      id: 'F-EMAIL', type: 'betaFeedbackScreenshotSubmissions',
+      attributes: { comment: 'apple-shape feedback', email: 'tester@example.com', createdDate: '2026-05-07T18:00:00Z' }
+    }];
+    await runPollOnce({ db, client: fakeClient(rows), appId: 'A1' });
+    const row = db.prepare('SELECT * FROM asc_feedback WHERE asc_id = ?').get('F-EMAIL') as any;
+    expect(row.tester_id).toBe('tester@example.com');
+  });
+
   it('falls back to current time when createdDate is malformed', async () => {
     const rows = [{
       id: 'F3', type: 'betaFeedbackScreenshotSubmissions',
