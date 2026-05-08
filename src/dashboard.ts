@@ -113,6 +113,32 @@ import { WARROOM_ENABLED, WARROOM_PORT } from './config.js';
 import { logger } from './logger.js';
 import { getTelegramConnected, getBotInfo, chatEvents, getIsProcessing, abortActiveQuery, ChatEvent } from './state.js';
 import { killProcess, isProcessAlive, findProcessesByPattern } from './platform.js';
+import { validateApproveRequest, parseFeedbackId } from './inbound-feedback-validate.js';
+import { readEnvFile } from './env.js';
+
+// Skills live outside src/ on purpose (skill manifest convention). Importing
+// statically would trip TS rootDir; the runtime-computed specifier mirrors
+// the appstoreconnect-skill loader in src/index.ts. Type is duplicated here
+// rather than imported to keep tsc rootDir clean — promoteFeedbackRow's
+// shape is owned by skills/github-issues/index.ts.
+interface PromoteFeedbackInputLocal {
+  dbPath: string;
+  feedbackId: number;
+  classification: 'bug' | 'feature_request' | 'praise' | 'confusion';
+  title: string;
+  body: string;
+  repo: string;
+  priority?: 'p0' | 'p1' | 'p2' | 'p3';
+}
+type PromoteFeedbackRowFn = (input: PromoteFeedbackInputLocal) => Promise<string>;
+let _promoteFeedbackRow: PromoteFeedbackRowFn | null = null;
+async function getPromoteFeedbackRow(): Promise<PromoteFeedbackRowFn> {
+  if (_promoteFeedbackRow) return _promoteFeedbackRow;
+  const skillPath = '../skills/github-issues/index.js';
+  const mod = (await import(skillPath)) as { promoteFeedbackRow: PromoteFeedbackRowFn };
+  _promoteFeedbackRow = mod.promoteFeedbackRow;
+  return _promoteFeedbackRow;
+}
 
 async function classifyTaskAgent(prompt: string): Promise<string | null> {
   const agentIds = listAgentIds();
@@ -1456,6 +1482,56 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
   app.get('/api/lanes/inbound-feedback', (c) => {
     const items = getInboundFeedback();
     return c.json({ items });
+  });
+
+  // Phase 3.5: Approve a row and promote it to a GitHub Issue. Validation
+  // contract is unit-tested in skills/github-issues/tests/route.test.ts via
+  // the validateApproveRequest helper; this handler is a thin wrapper that
+  // adds env resolution and the actual promoteFeedbackRow call.
+  app.post('/api/lanes/inbound-feedback/:id/approve', async (c) => {
+    const idParam = c.req.param('id');
+    const feedbackId = parseFeedbackId(idParam);
+    if (feedbackId === null) {
+      return c.json({ ok: false, error: 'invalid id' }, 400);
+    }
+
+    const raw = await c.req.json().catch(() => null);
+    if (raw === null) {
+      return c.json({ ok: false, error: 'invalid body' }, 400);
+    }
+
+    const validated = validateApproveRequest(raw);
+    if (!validated.ok) {
+      return c.json({ ok: false, error: validated.error }, 400);
+    }
+
+    // ClaudeClaw's readEnvFile is the source of truth for .env (see ASC poll
+    // in src/index.ts). Same pattern here so a manual .env edit takes effect
+    // without a restart.
+    const env = readEnvFile(['GITHUB_OWNER', 'GITHUB_REPO']);
+    const owner = env.GITHUB_OWNER;
+    const repo = env.GITHUB_REPO;
+    if (!owner || !repo) {
+      return c.json({ ok: false, error: 'GitHub repo env not configured' }, 500);
+    }
+
+    try {
+      const promoteFeedbackRow = await getPromoteFeedbackRow();
+      const url = await promoteFeedbackRow({
+        dbPath: path.join(STORE_DIR, 'claudeclaw.db'),
+        feedbackId,
+        classification: validated.value.classification,
+        title: validated.value.title,
+        body: validated.value.body,
+        repo: `${owner}/${repo}`,
+        priority: validated.value.priority,
+      });
+      return c.json({ ok: true, url });
+    } catch (err) {
+      logger.error({ err, feedbackId }, 'Failed to promote inbound feedback row');
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: message }, 500);
+    }
   });
 
   // Scheduled tasks

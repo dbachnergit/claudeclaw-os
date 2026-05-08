@@ -873,9 +873,35 @@ async function loadTasks() {
   }
 }
 
-// Inbound Feedback lane (App Store Connect). Read-only this phase.
-// Hidden when there are no pending rows, to avoid an empty section
-// in the common case.
+// Inbound Feedback lane (App Store Connect). Phase 3.5 added an
+// Approve-and-Promote button that opens an inline form, posts to
+// /api/lanes/inbound-feedback/:id/approve, and refreshes the lane on
+// success. Section stays hidden when there are no pending rows.
+function classifyInboundDefault(text, type) {
+  var t = String(text || '').toLowerCase();
+  if (type === 'testflight_crash') return 'bug';
+  if (/(crash|freeze|hang|bug)/.test(t)) return 'bug';
+  if (/(would love|wish|please add|feature|request)/.test(t)) return 'feature_request';
+  if (t.length < 20 || /(thanks|love|awesome|great)/.test(t)) return 'praise';
+  return 'confusion';
+}
+
+function defaultTitleFor(text) {
+  var s = String(text || '').trim().replace(/\s+/g, ' ');
+  if (s.length <= 80) return s || 'Feedback';
+  return s.slice(0, 80) + '…';
+}
+
+function defaultBodyFor(it) {
+  var when = new Date(it.received_at * 1000).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  var quoted = String(it.text || '').split('\n').map(function(l) { return '> ' + l; }).join('\n');
+  return quoted + '\n\n— ' + (it.tester_id || 'unknown') + ', build ' + (it.build_version || '?') + ', ' + when + '\n\n_(promoted from App Store Connect, asc_id=' + (it.asc_id || '') + ')_';
+}
+
+function escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 async function loadInboundFeedback() {
   try {
     const data = await api('/api/lanes/inbound-feedback');
@@ -890,14 +916,91 @@ async function loadInboundFeedback() {
     section.style.display = '';
     countEl.textContent = items.length + ' pending';
     container.innerHTML = items.map(function(it) {
+      var id = it.id;
       var when = new Date(it.received_at * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
       var typeLabel = it.type === 'testflight_crash' ? 'crash' : it.type === 'app_store_review' ? 'review' : 'feedback';
       var meta = typeLabel + ' &middot; build ' + escapeHtml(String(it.build_version || '')) + ' &middot; ' + escapeHtml(String(it.tester_id || '')) + ' &middot; ' + when;
-      return '<div class="card"><div class="text-xs text-gray-500 mb-1">' + meta + '</div><div class="text-sm text-gray-200 whitespace-pre-wrap">' + escapeHtml(String(it.text || '')) + '</div></div>';
+      var defaultClassification = classifyInboundDefault(it.text, it.type);
+      var defaultPriority = defaultClassification === 'bug' ? 'p2' : '';
+      var defaultTitle = defaultTitleFor(it.text);
+      var defaultBody = defaultBodyFor(it);
+      var classOptions = ['bug','feature_request','praise','confusion'].map(function(v) {
+        var sel = v === defaultClassification ? ' selected' : '';
+        return '<option value="' + v + '"' + sel + '>' + v + '</option>';
+      }).join('');
+      var prioOptions = ['','p0','p1','p2','p3'].map(function(v) {
+        var sel = v === defaultPriority ? ' selected' : '';
+        var label = v === '' ? '(none)' : v;
+        return '<option value="' + v + '"' + sel + '>' + label + '</option>';
+      }).join('');
+      var formId = 'approve-form-' + id;
+      var errId = 'approve-error-' + id;
+      var inputStyle = 'background:#0f0f0f;border:1px solid #2a2a2a;border-radius:6px;padding:6px 8px;color:#e0e0e0;width:100%;font-size:12px';
+      var form = ''
+        + '<details id="' + formId + '" style="margin-top:8px">'
+        + '<summary class="text-xs text-gray-300" style="cursor:pointer;list-style:none">Approve and Promote</summary>'
+        + '<form onsubmit="return submitApprove(event,' + id + ')" style="margin-top:8px;display:flex;flex-direction:column;gap:6px">'
+        +   '<label class="text-xs text-gray-500">Title<input name="title" type="text" maxlength="255" required value="' + escapeAttr(defaultTitle) + '" style="' + inputStyle + '"></label>'
+        +   '<label class="text-xs text-gray-500">Body<textarea name="body" rows="5" style="' + inputStyle + ';font-family:inherit">' + escapeHtml(defaultBody) + '</textarea></label>'
+        +   '<div style="display:flex;gap:8px">'
+        +     '<label class="text-xs text-gray-500" style="flex:1">Classification<select name="classification" style="' + inputStyle + '">' + classOptions + '</select></label>'
+        +     '<label class="text-xs text-gray-500" style="flex:1">Priority<select name="priority" style="' + inputStyle + '">' + prioOptions + '</select></label>'
+        +   '</div>'
+        +   '<div id="' + errId + '" class="text-xs" style="color:#f87171;display:none"></div>'
+        +   '<div style="display:flex;gap:8px;justify-content:flex-end">'
+        +     '<button type="button" onclick="cancelApprove(' + id + ')" style="background:none;border:1px solid #2a2a2a;border-radius:6px;color:#9ca3af;padding:4px 10px;font-size:12px;cursor:pointer">Cancel</button>'
+        +     '<button type="submit" style="background:#1f3a5f;border:1px solid #2a4a7a;border-radius:6px;color:#cbd5e1;padding:4px 10px;font-size:12px;cursor:pointer">Submit</button>'
+        +   '</div>'
+        + '</form>'
+        + '</details>';
+      return '<div class="card"><div class="text-xs text-gray-500 mb-1">' + meta + '</div><div class="text-sm text-gray-200 whitespace-pre-wrap">' + escapeHtml(String(it.text || '')) + '</div>' + form + '</div>';
     }).join('');
   } catch(e) {
     console.error('Inbound feedback load error:', e);
   }
+}
+
+function cancelApprove(id) {
+  var d = document.getElementById('approve-form-' + id);
+  if (d) d.removeAttribute('open');
+  var err = document.getElementById('approve-error-' + id);
+  if (err) { err.style.display = 'none'; err.textContent = ''; }
+}
+
+async function submitApprove(ev, id) {
+  ev.preventDefault();
+  var form = ev.target;
+  var errEl = document.getElementById('approve-error-' + id);
+  var submitBtn = form.querySelector('button[type="submit"]');
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+  var payload = {
+    classification: form.elements['classification'].value,
+    title: form.elements['title'].value,
+    body: form.elements['body'].value,
+  };
+  var pri = form.elements['priority'].value;
+  if (pri) payload.priority = pri;
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Submitting...'; }
+  try {
+    var url = BASE + '/api/lanes/inbound-feedback/' + id + '/approve?token=' + TOKEN;
+    var res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    var data = await res.json().catch(function() { return { ok: false, error: 'invalid response' }; });
+    if (res.ok && data && data.ok) {
+      await loadInboundFeedback();
+    } else {
+      var msg = (data && data.error) || ('HTTP ' + res.status);
+      if (errEl) { errEl.textContent = 'Failed: ' + msg; errEl.style.display = ''; }
+    }
+  } catch (e) {
+    if (errEl) { errEl.textContent = 'Failed: ' + (e && e.message ? e.message : e); errEl.style.display = ''; }
+  } finally {
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit'; }
+  }
+  return false;
 }
 
 function importanceColor(imp) {
