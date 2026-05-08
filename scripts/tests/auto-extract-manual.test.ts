@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { collectContextBundle, resolveSourcePaths } from '../auto-extract-manual';
+import {
+  collectContextBundle,
+  resolveSourcePaths,
+  synthesizeOperatingManual,
+} from '../auto-extract-manual';
 import { writeFileSync, mkdirSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -38,5 +42,36 @@ describe('collectContextBundle', () => {
     expect(bundle.missingSources).toEqual(
       expect.arrayContaining(['autoMemoryDir', 'vaultStrategyGlob', 'recentPlans'])
     );
+  });
+});
+
+describe('synthesizeOperatingManual', () => {
+  it('produces a manual object with all required files populated', async () => {
+    const stubClient = {
+      complete: async (_system: string, userPrompt: string) => {
+        if (userPrompt.includes('product.md'))
+          return '# Product\nPatient appointment intelligence';
+        if (userPrompt.includes('customers.md')) return '# Customers\nCaregivers';
+        if (userPrompt.includes('voice.md')) return '# Voice\nWarm, direct';
+        if (userPrompt.includes('connections.md')) return '# Connections\n- gh\n- supabase';
+        if (userPrompt.includes('decisions/log.md'))
+          return '## 2026-04-29 V2 design system\nDecision: ...';
+        return '';
+      },
+    };
+    const bundle = {
+      projectClaudeMd: '# Handbook',
+      brandFoundation: '## Voice rules',
+      autoMemoryFiles: [],
+      vaultStrategy: [],
+      recentPlans: [],
+      missingSources: [],
+    };
+    const manual = await synthesizeOperatingManual(bundle, stubClient);
+    expect(manual.product).toContain('appointment intelligence');
+    expect(manual.customers).toContain('Caregivers');
+    expect(manual.voice).toContain('Warm');
+    expect(manual.connections).toContain('gh');
+    expect(manual.decisionsBackfill).toContain('2026-04-29');
   });
 });

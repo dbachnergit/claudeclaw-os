@@ -71,3 +71,75 @@ export async function collectContextBundle(paths: SourcePaths): Promise<ContextB
     missingSources: missing,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Synthesis
+// ─────────────────────────────────────────────────────────────────────────
+
+// ModelClient takes the cacheable system prompt and a per-file user prompt
+// as separate arguments. The real Anthropic-backed client uses prompt
+// caching on the system block so the large shared context (CLAUDE.md +
+// BrandFoundation + memory + strategy + plans) is paid for once across
+// all five synthesis calls.
+export interface ModelClient {
+  complete(system: string, userPrompt: string): Promise<string>;
+}
+
+export interface OperatingManual {
+  product: string;
+  customers: string;
+  voice: string;
+  connections: string;
+  decisionsBackfill: string;
+}
+
+function buildBaseContext(bundle: ContextBundle): string {
+  return [
+    bundle.projectClaudeMd ? `## CLAUDE.md\n${bundle.projectClaudeMd}` : '',
+    bundle.brandFoundation ? `## BrandFoundation.md\n${bundle.brandFoundation}` : '',
+    bundle.autoMemoryFiles.map((f) => `## ${f.path}\n${f.content}`).join('\n\n'),
+    bundle.vaultStrategy.map((f) => `## ${f.path}\n${f.content}`).join('\n\n'),
+    bundle.recentPlans
+      .slice(-15)
+      .map((f) => `## ${f.path}\n${f.content.slice(0, 4000)}`)
+      .join('\n\n'),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+export async function synthesizeOperatingManual(
+  bundle: ContextBundle,
+  client: ModelClient
+): Promise<OperatingManual> {
+  const baseContext = buildBaseContext(bundle);
+
+  const ask = (file: string, instruction: string) =>
+    client.complete(
+      baseContext,
+      `Write ${file}. ${instruction}\nOutput markdown only.`
+    );
+
+  return {
+    product: await ask(
+      'docs/operating-manual/context/product.md',
+      'Capture the product mission, the strategic north star, and the niche we serve.'
+    ),
+    customers: await ask(
+      'docs/operating-manual/context/customers.md',
+      'Describe the primary user (caregiver), the secondary user (patient), known constraints (PHI, privacy stance).'
+    ),
+    voice: await ask(
+      'docs/operating-manual/context/voice.md',
+      'Document the voice and tone rules. Include 3-5 short examples of approved phrasing and 3-5 examples of phrasing to avoid.'
+    ),
+    connections: await ask(
+      'docs/operating-manual/connections.md',
+      'List every tool, service, MCP server, skill, and external system the AI OS needs to know about. Format as a registry.'
+    ),
+    decisionsBackfill: await ask(
+      'docs/operating-manual/decisions/log.md',
+      'Backfill the decisions log with the 10 most important architectural decisions you can infer from the plans. Append-only format. Date them when known.'
+    ),
+  };
+}
