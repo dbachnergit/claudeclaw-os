@@ -9,7 +9,10 @@ dist/
 
 # Runtime data — NEVER commit. Contains WhatsApp/Slack messages,
 # session tokens, conversation logs, and database files.
-store/
+store/*
+# Migration SQL files live under store/ but are source-of-truth schema and
+# must be committed.
+!store/migrations/
 workspace/
 *.db
 *.db-wal
