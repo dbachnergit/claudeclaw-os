@@ -64,6 +64,7 @@ import {
   dismissAgentSuggestion,
   markAgentSuggestionActed,
   getRecentlySuggestedSplits,
+  getInboundFeedback,
 } from './db.js';
 import { computeNextRun } from './scheduler.js';
 import { generateContent, parseJsonResponse } from './gemini.js';
@@ -1447,6 +1448,14 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     } catch (err) {
       return c.json({ ok: false, error: String(err) }, 500);
     }
+  });
+
+  // Inbound feedback lane (App Store Connect, Phase 2 read-only).
+  // Phase 3 will add Approve/Promote actions; Phase 4 will add draft
+  // Edit/Reject. Auto-refreshed every 30s on the dashboard.
+  app.get('/api/lanes/inbound-feedback', (c) => {
+    const items = getInboundFeedback();
+    return c.json({ items });
   });
 
   // Scheduled tasks

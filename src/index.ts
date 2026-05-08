@@ -6,7 +6,7 @@ import { createBot } from './bot.js';
 import { checkPendingMigrations } from './migrations.js';
 import { ALLOWED_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE, WARROOM_ENABLED, WARROOM_PORT } from './config.js';
 import { startDashboard } from './dashboard.js';
-import { initDatabase, cleanupOldMissionTasks, insertAuditLog } from './db.js';
+import { initDatabase, cleanupOldMissionTasks, insertAuditLog, applyAscFeedbackSchemaIfMissing } from './db.js';
 import { initSecurity, setAuditCallback } from './security.js';
 import { logger } from './logger.js';
 import { cleanupOldUploads } from './media.js';
@@ -131,6 +131,13 @@ async function main(): Promise<void> {
       logger.error('Fix: add DB_ENCRYPTION_KEY to .env. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
     }
     process.exit(1);
+  }
+  // Apply skill-owned schemas after the core DB is up. Idempotent; safe to
+  // call on every boot. Skipped silently if the migration file is absent.
+  try {
+    applyAscFeedbackSchemaIfMissing();
+  } catch (err: any) {
+    logger.error('asc_feedback schema apply failed: %s', err?.message || err);
   }
   logger.info('Database ready');
 

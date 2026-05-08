@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { DB_ENCRYPTION_KEY, STORE_DIR } from './config.js';
+import { DB_ENCRYPTION_KEY, PROJECT_ROOT, STORE_DIR } from './config.js';
 import { cosineSimilarity } from './embeddings.js';
 import { logger } from './logger.js';
 
@@ -1267,6 +1267,49 @@ export function getAllScheduledTasks(agentId?: string): ScheduledTask[] {
   return db
     .prepare('SELECT * FROM scheduled_tasks ORDER BY created_at DESC')
     .all() as ScheduledTask[];
+}
+
+// ── App Store Connect inbound feedback (Phase 2) ────────────────────
+// The asc_feedback table is owned by the appstoreconnect skill. Its
+// schema lives in store/migrations/2026-05-08-asc-feedback.sql and is
+// applied at startup by applyAscFeedbackSchemaIfMissing(). Phase 2 only
+// reads pending rows for the dashboard lane; Phase 3 will mutate them.
+export interface InboundFeedbackRow {
+  id: number;
+  asc_id: string;
+  type: string;
+  tester_id: string;
+  build_version: string;
+  text: string;
+  received_at: number;
+}
+
+export function getInboundFeedback(): InboundFeedbackRow[] {
+  // Schema applied at startup; return [] if table is missing for any reason
+  // (e.g. in-memory test DB) so the dashboard route never 500s.
+  try {
+    return db.prepare(`
+      SELECT id, asc_id, type, tester_id, build_version, text, received_at
+      FROM asc_feedback
+      WHERE status = 'pending_classification'
+      ORDER BY received_at DESC
+      LIMIT 200
+    `).all() as InboundFeedbackRow[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Apply the App Store Connect feedback schema if the table is missing.
+ * Loads SQL from the skill's migration file so the migration source-of-truth
+ * remains store/migrations/. Idempotent (CREATE TABLE IF NOT EXISTS).
+ */
+export function applyAscFeedbackSchemaIfMissing(): void {
+  const sqlPath = path.join(PROJECT_ROOT, 'store', 'migrations', '2026-05-08-asc-feedback.sql');
+  if (!fs.existsSync(sqlPath)) return;
+  const sql = fs.readFileSync(sqlPath, 'utf8');
+  db.exec(sql);
 }
 
 /**

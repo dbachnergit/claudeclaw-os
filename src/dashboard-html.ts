@@ -321,6 +321,15 @@ ${WARROOM_ENABLED ? `<div class="card" style="border:1px solid #1e3a5f">
   <div id="tasks-inbox" class="flex flex-wrap gap-3"></div>
 </div>
 
+<!-- Inbound Feedback (App Store Connect) -->
+<div id="inbound-feedback-section" class="mb-5" style="display:none">
+  <div class="flex items-center justify-between mb-2">
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Inbound Feedback</h2>
+    <span id="inbound-feedback-count" class="text-xs text-gray-500"></span>
+  </div>
+  <div id="inbound-feedback-container" class="flex flex-col gap-2"></div>
+</div>
+
 <!-- Mission Control -->
 <div id="mission-section" class="mb-5" style="display:none">
   <div class="flex items-center justify-between mb-2">
@@ -861,6 +870,33 @@ async function loadTasks() {
     }).join('');
   } catch(e) {
     document.getElementById('tasks-container').innerHTML = '<div class="card text-red-400 text-sm">Failed to load tasks</div>';
+  }
+}
+
+// Inbound Feedback lane (App Store Connect). Read-only this phase.
+// Hidden when there are no pending rows, to avoid an empty section
+// in the common case.
+async function loadInboundFeedback() {
+  try {
+    const data = await api('/api/lanes/inbound-feedback');
+    const section = document.getElementById('inbound-feedback-section');
+    const container = document.getElementById('inbound-feedback-container');
+    const countEl = document.getElementById('inbound-feedback-count');
+    const items = data.items || [];
+    if (items.length === 0) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = '';
+    countEl.textContent = items.length + ' pending';
+    container.innerHTML = items.map(function(it) {
+      var when = new Date(it.received_at * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+      var typeLabel = it.type === 'testflight_crash' ? 'crash' : it.type === 'app_store_review' ? 'review' : 'feedback';
+      var meta = typeLabel + ' &middot; build ' + escapeHtml(String(it.build_version || '')) + ' &middot; ' + escapeHtml(String(it.tester_id || '')) + ' &middot; ' + when;
+      return '<div class="card"><div class="text-xs text-gray-500 mb-1">' + meta + '</div><div class="text-sm text-gray-200 whitespace-pre-wrap">' + escapeHtml(String(it.text || '')) + '</div></div>';
+    }).join('');
+  } catch(e) {
+    console.error('Inbound feedback load error:', e);
   }
 }
 
@@ -2442,6 +2478,11 @@ function closeTaskHistory() {
 
 // Poll mission tasks more frequently (every 15s) for responsiveness
 setInterval(loadMissionControl, 15000);
+
+// Inbound Feedback lane: kick off an immediate load and then refresh
+// every 30s. Section hides itself when there are no pending rows.
+loadInboundFeedback();
+setInterval(loadInboundFeedback, 30000);
 
 async function refreshAll() {
   const btn = document.getElementById('refresh-btn').querySelector('svg');
