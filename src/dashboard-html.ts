@@ -990,6 +990,18 @@ async function submitApprove(ev, id) {
     });
     var data = await res.json().catch(function() { return { ok: false, error: 'invalid response' }; });
     if (res.ok && data && data.ok) {
+      // Brief inline confirmation showing the new issue URL before the
+      // 30s lane refresh removes the card. Operator can click through.
+      if (data.url) {
+        var card = form.closest('.card');
+        if (card) {
+          var confirm = document.createElement('div');
+          confirm.className = 'text-xs mt-2';
+          confirm.style.color = '#10b981';
+          confirm.innerHTML = 'Issue created: <a href="' + escapeAttr(String(data.url)) + '" target="_blank" rel="noopener" style="color:#10b981;text-decoration:underline">' + escapeHtml(String(data.url)) + '</a>';
+          card.appendChild(confirm);
+        }
+      }
       await loadInboundFeedback();
     } else {
       var msg = (data && data.error) || ('HTTP ' + res.status);

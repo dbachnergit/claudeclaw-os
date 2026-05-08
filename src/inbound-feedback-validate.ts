@@ -89,10 +89,13 @@ export function validateApproveRequest(raw: unknown): ValidateResult {
 }
 
 /**
- * Parse the URL `:id` param. Returns null on NaN.
+ * Parse the URL `:id` param. Returns null unless the input is a positive
+ * integer. asc_feedback ids are AUTOINCREMENT, so 0 and negatives are
+ * never valid. Floats would silently coerce inside SQLite (`WHERE id = ?`
+ * truncates to int), fetching the wrong row — reject them at the boundary.
  */
 export function parseFeedbackId(raw: string): number | null {
   const n = Number(raw);
-  if (Number.isNaN(n) || !Number.isFinite(n)) return null;
+  if (!Number.isInteger(n) || n <= 0) return null;
   return n;
 }

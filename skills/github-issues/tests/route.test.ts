@@ -18,10 +18,9 @@ import {
 } from '../../../src/inbound-feedback-validate.js';
 
 describe('parseFeedbackId', () => {
-  it('returns the number for valid integer-ish strings', () => {
+  it('returns the number for valid positive integer strings', () => {
     expect(parseFeedbackId('42')).toBe(42);
     expect(parseFeedbackId('1')).toBe(1);
-    expect(parseFeedbackId('0')).toBe(0);
   });
 
   it('returns null for NaN', () => {
@@ -33,6 +32,17 @@ describe('parseFeedbackId', () => {
   it('returns null for non-finite values', () => {
     expect(parseFeedbackId('Infinity')).toBeNull();
     expect(parseFeedbackId('-Infinity')).toBeNull();
+  });
+
+  it('returns null for floats (would silently truncate inside SQLite)', () => {
+    expect(parseFeedbackId('1.5')).toBeNull();
+    expect(parseFeedbackId('0.9')).toBeNull();
+  });
+
+  it('returns null for zero and negatives (asc_feedback ids start at 1)', () => {
+    expect(parseFeedbackId('0')).toBeNull();
+    expect(parseFeedbackId('-1')).toBeNull();
+    expect(parseFeedbackId('-42')).toBeNull();
   });
 });
 

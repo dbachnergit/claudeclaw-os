@@ -120,4 +120,27 @@ describe('promoteFeedbackRow', () => {
     expect(row.status).toBe('pending_classification');
     expect(row.github_issue_url).toBeNull();
   });
+
+  it('is idempotent: returns existing URL without re-creating issue if already approved', async () => {
+    const { dbPath } = makeDb();
+    // Mark the row already approved with an existing issue URL.
+    const setupDb = new Database(dbPath);
+    setupDb.prepare(
+      "UPDATE asc_feedback SET status = 'approved', github_issue_url = 'https://github.com/x/y/issues/7' WHERE id = 1"
+    ).run();
+    setupDb.close();
+
+    const exec = vi.fn();
+    const url = await promoteFeedbackRow({
+      dbPath,
+      feedbackId: 1,
+      classification: 'bug',
+      title: 't', body: 'b',
+      repo: 'x/y',
+      exec,
+    });
+
+    expect(url).toBe('https://github.com/x/y/issues/7');
+    expect(exec).not.toHaveBeenCalled();
+  });
 });

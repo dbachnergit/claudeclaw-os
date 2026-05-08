@@ -23,11 +23,17 @@ export interface PromoteFeedbackInput {
 export async function promoteFeedbackRow(input: PromoteFeedbackInput): Promise<string> {
   const db = new Database(input.dbPath);
   try {
-    const row = db.prepare('SELECT type FROM asc_feedback WHERE id = ?').get(input.feedbackId) as
-      | { type: string }
+    const row = db.prepare('SELECT type, status, github_issue_url FROM asc_feedback WHERE id = ?').get(input.feedbackId) as
+      | { type: string; status: string; github_issue_url: string | null }
       | undefined;
     if (!row) {
       throw new Error(`asc_feedback row ${input.feedbackId} not found`);
+    }
+    // Idempotency guard: if the row was already promoted (e.g. concurrent
+    // submit from a second browser tab), return the existing URL instead of
+    // creating a duplicate GitHub Issue. gh issue create is not idempotent.
+    if (row.status === 'approved' && row.github_issue_url) {
+      return row.github_issue_url;
     }
     const labels = deriveLabels({
       source: row.type as Source,
