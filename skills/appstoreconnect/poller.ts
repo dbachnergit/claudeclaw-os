@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { AscClient, AscResource } from './client.js';
+import type { AscClient, AscPagedResponse, AscResource } from './client.js';
 
 export interface PollOptions {
   db: Database.Database;
@@ -11,6 +11,50 @@ export interface PollResult {
   inserted: number;
   skipped: number;
   errors: string[];
+}
+
+type SourceKind = 'feedback' | 'crash' | 'review';
+
+interface PollSource {
+  kind: SourceKind;
+  type: 'testflight_feedback' | 'testflight_crash' | 'app_store_review';
+  load: () => Promise<AscPagedResponse>;
+}
+
+function buildVersionLookup(included: AscResource[] | undefined): Map<string, string> {
+  const lookup = new Map<string, string>();
+  for (const inc of included ?? []) {
+    if (inc.type === 'builds' && inc.attributes && typeof (inc.attributes as { version?: unknown }).version === 'string') {
+      lookup.set(inc.id, String((inc.attributes as { version: string }).version));
+    }
+  }
+  return lookup;
+}
+
+function deriveText(kind: SourceKind, a: Record<string, unknown>): string {
+  // App Store reviews carry both a title and a body; the title is short and
+  // is part of how testers describe the issue, so prepend it. TestFlight
+  // feedback uses `comment`; crash submissions sometimes have `text`.
+  if (kind === 'review') {
+    const title = typeof a.title === 'string' ? a.title : '';
+    const body = typeof a.body === 'string' ? a.body : '';
+    return title && body ? `${title}\n\n${body}` : title || body;
+  }
+  return (a.comment as string | undefined) ?? (a.text as string | undefined) ?? '';
+}
+
+function deriveTesterId(kind: SourceKind, a: Record<string, unknown>): string {
+  // Apple exposes a tester email on TestFlight resources but only a public
+  // nickname on App Store reviews (no PII surface). Phase 4's reply step
+  // uses asc_id (review id) to address responses, so the nickname is just
+  // for display.
+  if (kind === 'review') {
+    return (a.reviewerNickname as string | undefined) ?? 'anonymous';
+  }
+  return (a.email as string | undefined)
+    ?? (a.testerEmail as string | undefined)
+    ?? (a.testerId as string | undefined)
+    ?? 'unknown';
 }
 
 export async function runPollOnce(opts: PollOptions): Promise<PollResult> {
@@ -28,33 +72,36 @@ export async function runPollOnce(opts: PollOptions): Promise<PollResult> {
     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_classification', ?, ?)
   `);
 
-  const sources: Array<{ kind: string; load: () => Promise<AscResource[]>; type: string }> = [
-    { kind: 'feedback', load: () => client.listBetaFeedback(appId), type: 'testflight_feedback' },
-    { kind: 'crash', load: () => client.listBetaCrashFeedback(appId), type: 'testflight_crash' },
+  const sources: PollSource[] = [
+    { kind: 'feedback', type: 'testflight_feedback', load: () => client.listBetaFeedback(appId) },
+    { kind: 'crash',    type: 'testflight_crash',    load: () => client.listBetaCrashFeedback(appId) },
+    { kind: 'review',   type: 'app_store_review',    load: () => client.listCustomerReviews(appId) },
   ];
 
   for (const src of sources) {
     try {
-      const items = await src.load();
-      for (const item of items) {
-        const a = (item.attributes as any) ?? {};
-        const parsed = a.createdDate ? Math.floor(new Date(a.createdDate).getTime() / 1000) : NaN;
+      const response = await src.load();
+      const buildById = buildVersionLookup(response.included);
+
+      for (const item of response.data) {
+        const a = (item.attributes as Record<string, unknown> | undefined) ?? {};
+        const parsed = typeof a.createdDate === 'string'
+          ? Math.floor(new Date(a.createdDate).getTime() / 1000)
+          : NaN;
         const receivedAt = Number.isFinite(parsed) ? parsed : Math.floor(Date.now() / 1000);
         const fetchedAt = Math.floor(Date.now() / 1000);
-        // Apple's actual fields differ from the original Phase 2 plan:
-        // - tester email is `email` on betaFeedback{Screenshot,Crash}Submissions
-        //   attributes, not `testerEmail`.
-        // - There is NO `buildVersion` on these resources. The build version
-        //   label is reachable via `relationships.build` -> a separate
-        //   /v1/builds/{id} fetch (or ?include=build). Marked as a Phase 2
-        //   follow-up; for now we leave build_version empty when absent.
+        const buildId = item.relationships?.build?.data?.id;
+        const buildVersion = buildId ? buildById.get(buildId) ?? 'unknown' : 'unknown';
+        const screenshots = Array.isArray((a as { screenshots?: unknown[] }).screenshots)
+          ? (a as { screenshots: unknown[] }).screenshots
+          : [];
         const result = insert.run(
           item.id,
           src.type,
-          a.email ?? a.testerEmail ?? a.testerId ?? 'unknown',
-          a.buildVersion ?? 'unknown',
-          a.comment ?? a.text ?? '',
-          JSON.stringify(a.screenshots ?? []),
+          deriveTesterId(src.kind, a),
+          buildVersion,
+          deriveText(src.kind, a),
+          JSON.stringify(screenshots),
           JSON.stringify(item),
           receivedAt,
           fetchedAt

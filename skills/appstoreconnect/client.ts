@@ -8,6 +8,12 @@ export interface AscResource<T = Record<string, unknown>> {
   id: string;
   type: string;
   attributes?: T;
+  relationships?: Record<string, { data?: { id: string; type: string } | null; links?: unknown }>;
+}
+
+export interface AscPagedResponse {
+  data: AscResource[];
+  included?: AscResource[];
 }
 
 export class AscClient {
@@ -38,18 +44,22 @@ export class AscClient {
   // GET_INSTANCE and DELETE. Collection access requires the nested
   // /v1/apps/{id}/... path. The original Phase 2 plan pre-dated this
   // restriction; verified empirically against the live API on 2026-05-08.
-  async listBetaFeedback(appId: string): Promise<AscResource[]> {
-    const json = await this.getJson<{ data: AscResource[] }>(`/apps/${appId}/betaFeedbackScreenshotSubmissions`);
-    return json.data;
+  //
+  // ?include=build pulls the related `builds` resource into `included[]`
+  // so the poller can resolve relationships.build.data.id -> attributes.version
+  // (the human label like "96") without a per-item N+1 round trip.
+  async listBetaFeedback(appId: string): Promise<AscPagedResponse> {
+    return this.getJson<AscPagedResponse>(`/apps/${appId}/betaFeedbackScreenshotSubmissions?include=build`);
   }
 
-  async listBetaCrashFeedback(appId: string): Promise<AscResource[]> {
-    const json = await this.getJson<{ data: AscResource[] }>(`/apps/${appId}/betaFeedbackCrashSubmissions`);
-    return json.data;
+  async listBetaCrashFeedback(appId: string): Promise<AscPagedResponse> {
+    return this.getJson<AscPagedResponse>(`/apps/${appId}/betaFeedbackCrashSubmissions?include=build`);
   }
 
-  async listCustomerReviews(appId: string): Promise<AscResource[]> {
-    const json = await this.getJson<{ data: AscResource[] }>(`/apps/${appId}/customerReviews`);
-    return json.data;
+  // App Store reviews don't have a `build` relationship (they're tied to
+  // appStoreVersion, not testflight builds). build_version stays empty for
+  // these rows; the consumer can derive territory from the raw response.
+  async listCustomerReviews(appId: string): Promise<AscPagedResponse> {
+    return this.getJson<AscPagedResponse>(`/apps/${appId}/customerReviews`);
   }
 }
