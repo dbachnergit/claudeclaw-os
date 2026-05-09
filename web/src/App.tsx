@@ -6,6 +6,7 @@ import { ToastStack } from '@/components/ToastStack';
 import { sidebarOpen, closeSidebar } from '@/lib/sidebar';
 import { Placeholder } from '@/pages/Placeholder';
 import { MissionControl } from '@/pages/MissionControl';
+import { InboundFeedback } from '@/pages/InboundFeedback';
 import { Memories } from '@/pages/Memories';
 import { HiveMind } from '@/pages/HiveMind';
 import { Agents } from '@/pages/Agents';
@@ -46,6 +47,7 @@ export function App() {
       <main class="flex-1 min-w-0 overflow-hidden pl-12 md:pl-0">
         <Switch>
           <Route path="/mission"><MissionControl /></Route>
+          <Route path="/inbound"><InboundFeedback /></Route>
           <Route path="/scheduled"><Scheduled /></Route>
           <Route path="/agents"><Agents /></Route>
           <Route path="/agents/:id/files"><AgentFiles /></Route>

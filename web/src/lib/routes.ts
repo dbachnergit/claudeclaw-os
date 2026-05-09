@@ -3,6 +3,7 @@ import {
   Brain, Network, Activity, ShieldCheck,
   Swords,
   Settings,
+  Inbox,
 } from 'lucide-preact';
 import type { ComponentChildren } from 'preact';
 
@@ -21,6 +22,7 @@ export interface RouteDef {
 // "Voice config" sub-tab and is reachable via /warroom?mode=voices.
 export const ROUTES: RouteDef[] = [
   { path: '/mission',    label: 'Mission Control', section: 'workspace',    icon: LayoutGrid,    shortcut: 'g m' },
+  { path: '/inbound',    label: 'Inbound Feedback',section: 'workspace',    icon: Inbox,         shortcut: 'g i' },
   { path: '/scheduled',  label: 'Scheduled',       section: 'workspace',    icon: ListTodo,      shortcut: 'g s' },
   { path: '/agents',     label: 'Agents',          section: 'workspace',    icon: Users,         shortcut: 'g a' },
   { path: '/chat',       label: 'Chat',            section: 'workspace',    icon: MessageSquare, shortcut: 'g c' },
