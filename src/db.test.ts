@@ -21,6 +21,10 @@ import {
   getDashboardTopAccessedMemories,
   getDashboardMemoriesList,
   getDashboardMemoryTimeline,
+  applyAscFeedbackSchemaIfMissing,
+  getInboundFeedbackWithDrafts,
+  _testInsertAscFeedback,
+  _testInsertAscDraft,
 } from './db.js';
 
 describe('database', () => {
@@ -408,6 +412,108 @@ describe('database', () => {
       expect(timeline.length).toBeGreaterThanOrEqual(1);
       expect(timeline[0]).toHaveProperty('date');
       expect(timeline[0]).toHaveProperty('count');
+    });
+  });
+
+  // ── Inbound feedback lane (Phase 4 Task 4.6) ──────────────────────
+  // The dashboard's /api/lanes/inbound-feedback route serves the LEFT-JOIN
+  // view: one row per feedback row in pending_classification or
+  // pending_approval, with an optional draft attached. Drift in this shape
+  // breaks the SPA card silently.
+  describe('getInboundFeedbackWithDrafts', () => {
+    beforeEach(() => {
+      // applyAscFeedbackSchemaIfMissing() is the production startup path; it
+      // creates asc_feedback (+github_issue_url) and asc_drafts. Calling it
+      // here keeps the test exercising the same path.
+      applyAscFeedbackSchemaIfMissing();
+    });
+
+    it('returns a feedback row without a draft (draft_id null) when no draft exists', () => {
+      const fid = _testInsertAscFeedback({
+        asc_id: 'a-no-draft',
+        text: 'Crash on save',
+        status: 'pending_classification',
+      });
+      const items = getInboundFeedbackWithDrafts();
+      const row = items.find((r) => r.id === fid);
+      expect(row).toBeDefined();
+      expect(row!.draft_id).toBeNull();
+      expect(row!.draft_classification).toBeNull();
+      expect(row!.suggested_issue_title).toBeNull();
+      expect(row!.phi_flag).toBeNull();
+      expect(row!.redacted_terms).toBeNull();
+      expect(row!.status).toBe('pending_classification');
+    });
+
+    it('joins a pending_approval draft and decodes redacted_terms to string[]', () => {
+      const fid = _testInsertAscFeedback({
+        asc_id: 'a-with-draft',
+        text: 'I take Lisinopril and the app crashes',
+        status: 'pending_approval',
+      });
+      const draftId = _testInsertAscDraft({
+        feedback_id: fid,
+        classification: 'bug',
+        draft_subject: 'Re: Crash on save',
+        draft_body: 'Thanks — looking into it.',
+        suggested_issue_title: 'App crashes',
+        suggested_issue_body: 'TestFlight build 71.',
+        suggested_priority: 'p1',
+        phi_flag: 1,
+        redacted_terms: JSON.stringify(['lisinopril']),
+        status: 'pending_approval',
+      });
+      const items = getInboundFeedbackWithDrafts();
+      const row = items.find((r) => r.id === fid);
+      expect(row).toBeDefined();
+      expect(row!.draft_id).toBe(draftId);
+      expect(row!.draft_classification).toBe('bug');
+      expect(row!.draft_subject).toBe('Re: Crash on save');
+      expect(row!.suggested_issue_title).toBe('App crashes');
+      expect(row!.suggested_priority).toBe('p1');
+      expect(row!.phi_flag).toBe(1);
+      expect(row!.redacted_terms).toEqual(['lisinopril']);
+      expect(row!.status).toBe('pending_approval');
+    });
+
+    it('does not surface drafts with status approved or rejected (only pending_approval joins)', () => {
+      const fid = _testInsertAscFeedback({
+        asc_id: 'a-approved-draft',
+        text: 'feedback text',
+        status: 'pending_approval',
+      });
+      _testInsertAscDraft({ feedback_id: fid, status: 'approved' });
+      const items = getInboundFeedbackWithDrafts();
+      const row = items.find((r) => r.id === fid);
+      expect(row).toBeDefined();
+      // The pending_approval feedback row is still listed, but the
+      // 'approved' draft is filtered out by the JOIN's status predicate.
+      expect(row!.draft_id).toBeNull();
+    });
+
+    it('omits feedback rows in approved/rejected/sent/error status', () => {
+      _testInsertAscFeedback({ asc_id: 'a-approved', status: 'approved' });
+      _testInsertAscFeedback({ asc_id: 'a-rejected', status: 'rejected' });
+      _testInsertAscFeedback({ asc_id: 'a-sent', status: 'sent' });
+      _testInsertAscFeedback({ asc_id: 'a-error', status: 'error' });
+      const items = getInboundFeedbackWithDrafts();
+      const ascIds = items.map((r) => r.asc_id);
+      expect(ascIds).not.toContain('a-approved');
+      expect(ascIds).not.toContain('a-rejected');
+      expect(ascIds).not.toContain('a-sent');
+      expect(ascIds).not.toContain('a-error');
+    });
+
+    it('returns redacted_terms as [] when the JSON in DB is malformed', () => {
+      const fid = _testInsertAscFeedback({ asc_id: 'a-bad-json', status: 'pending_approval' });
+      _testInsertAscDraft({
+        feedback_id: fid,
+        redacted_terms: 'not-json',
+      });
+      const items = getInboundFeedbackWithDrafts();
+      const row = items.find((r) => r.id === fid);
+      expect(row).toBeDefined();
+      expect(row!.redacted_terms).toEqual([]);
     });
   });
 });

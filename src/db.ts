@@ -1300,6 +1300,137 @@ export function getInboundFeedback(): InboundFeedbackRow[] {
   }
 }
 
+// Phase 4 Task 4.6: extended view that LEFT JOINs the most recent pending
+// asc_drafts row per feedback. The dashboard SPA uses this to pre-populate
+// the operator's review form with the comms-agent's drafted reply, surface
+// PHI flags, and offer a re-draft action. Decoded `redacted_terms` is
+// returned as `string[]` so the frontend doesn't have to JSON.parse it.
+//
+// Selected statuses:
+//   - 'pending_classification': feedback present, agent hasn't drafted yet
+//     (cron runs every 5 min, or comms-agent is paused / API key missing).
+//     These rows return draft_id: null and the operator falls back to the
+//     heuristic defaults in the SPA.
+//   - 'pending_approval': feedback has a draft awaiting human approval.
+export interface InboundFeedbackWithDraftRow extends InboundFeedbackRow {
+  status: string;
+  draft_id: number | null;
+  draft_classification: string | null;
+  draft_subject: string | null;
+  draft_body: string | null;
+  suggested_issue_title: string | null;
+  suggested_issue_body: string | null;
+  suggested_priority: string | null;
+  phi_flag: number | null;
+  redacted_terms: string[] | null;
+  draft_created_at: number | null;
+}
+
+export function getInboundFeedbackWithDrafts(): InboundFeedbackWithDraftRow[] {
+  try {
+    const rows = db.prepare(`
+      SELECT
+        f.id, f.asc_id, f.type, f.tester_id, f.build_version, f.text, f.received_at, f.status,
+        d.id AS draft_id,
+        d.classification AS draft_classification,
+        d.draft_subject,
+        d.draft_body,
+        d.suggested_issue_title,
+        d.suggested_issue_body,
+        d.suggested_priority,
+        d.phi_flag,
+        d.redacted_terms,
+        d.created_at AS draft_created_at
+      FROM asc_feedback f
+      LEFT JOIN asc_drafts d ON d.feedback_id = f.id AND d.status = 'pending_approval'
+      WHERE f.status IN ('pending_classification', 'pending_approval')
+      ORDER BY COALESCE(d.created_at, f.received_at) DESC
+      LIMIT 200
+    `).all() as Array<Omit<InboundFeedbackWithDraftRow, 'redacted_terms'> & { redacted_terms: string | null }>;
+
+    return rows.map((r) => ({
+      ...r,
+      redacted_terms: decodeRedactedTerms(r.redacted_terms),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** @internal - tests only. Insert a minimal asc_feedback row. */
+export function _testInsertAscFeedback(row: {
+  asc_id: string;
+  type?: 'testflight_feedback' | 'testflight_crash' | 'app_store_review';
+  tester_id?: string;
+  build_version?: string;
+  text?: string;
+  status?: 'pending_classification' | 'pending_approval' | 'approved' | 'rejected' | 'sent' | 'error';
+  received_at?: number;
+}): number {
+  const now = Math.floor(Date.now() / 1000);
+  const result = db.prepare(`
+    INSERT INTO asc_feedback (asc_id, type, tester_id, build_version, text, screenshots_json, raw_json, status, received_at, fetched_at)
+    VALUES (?, ?, ?, ?, ?, '[]', '{}', ?, ?, ?)
+  `).run(
+    row.asc_id,
+    row.type ?? 'testflight_feedback',
+    row.tester_id ?? 'tester',
+    row.build_version ?? '71',
+    row.text ?? '',
+    row.status ?? 'pending_classification',
+    row.received_at ?? now,
+    now,
+  );
+  return result.lastInsertRowid as number;
+}
+
+/** @internal - tests only. Insert a minimal asc_drafts row. */
+export function _testInsertAscDraft(row: {
+  feedback_id: number;
+  classification?: string;
+  draft_subject?: string;
+  draft_body?: string;
+  suggested_issue_title?: string;
+  suggested_issue_body?: string;
+  suggested_priority?: string;
+  phi_flag?: 0 | 1;
+  redacted_terms?: string;
+  status?: 'pending_approval' | 'approved' | 'rejected';
+  created_at?: number;
+}): number {
+  const now = Math.floor(Date.now() / 1000);
+  const result = db.prepare(`
+    INSERT INTO asc_drafts (feedback_id, classification, draft_subject, draft_body, suggested_issue_title, suggested_issue_body, suggested_priority, phi_flag, redacted_terms, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    row.feedback_id,
+    row.classification ?? 'bug',
+    row.draft_subject ?? 'Re: subject',
+    row.draft_body ?? 'body',
+    row.suggested_issue_title ?? 'title',
+    row.suggested_issue_body ?? 'issue body',
+    row.suggested_priority ?? 'p2',
+    row.phi_flag ?? 0,
+    row.redacted_terms ?? '[]',
+    row.status ?? 'pending_approval',
+    row.created_at ?? now,
+  );
+  return result.lastInsertRowid as number;
+}
+
+function decodeRedactedTerms(raw: string | null): string[] | null {
+  if (raw === null || raw === undefined) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) {
+      return parsed as string[];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Apply the App Store Connect feedback schema if the table is missing.
  * Loads SQL from the skill's migration file so the migration source-of-truth
@@ -1318,6 +1449,17 @@ export function applyAscFeedbackSchemaIfMissing(): void {
   const ascCols = db.prepare(`PRAGMA table_info(asc_feedback)`).all() as Array<{ name: string }>;
   if (ascCols.length > 0) {
     addColumnIfMissing(db, 'asc_feedback', 'github_issue_url', 'TEXT');
+  }
+
+  // Phase 4 (Task 4.6): the asc_drafts table is referenced by the dashboard
+  // lane's LEFT JOIN. If it's missing the route's outer try/catch swallows
+  // the SQL error and the lane shows blank — apply at startup too. The SQL
+  // is self-idempotent (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT
+  // EXISTS) so this is safe to run on every boot.
+  const draftsSqlPath = path.join(PROJECT_ROOT, 'store', 'migrations', '2026-05-08-asc-drafts.sql');
+  if (fs.existsSync(draftsSqlPath)) {
+    const draftsSql = fs.readFileSync(draftsSqlPath, 'utf8');
+    db.exec(draftsSql);
   }
 }
 

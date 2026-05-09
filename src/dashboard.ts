@@ -64,7 +64,7 @@ import {
   dismissAgentSuggestion,
   markAgentSuggestionActed,
   getRecentlySuggestedSplits,
-  getInboundFeedback,
+  getInboundFeedbackWithDrafts,
 } from './db.js';
 import { computeNextRun } from './scheduler.js';
 import { generateContent, parseJsonResponse } from './gemini.js';
@@ -138,6 +138,39 @@ async function getPromoteFeedbackRow(): Promise<PromoteFeedbackRowFn> {
   const mod = (await import(skillPath)) as { promoteFeedbackRow: PromoteFeedbackRowFn };
   _promoteFeedbackRow = mod.promoteFeedbackRow;
   return _promoteFeedbackRow;
+}
+
+/**
+ * Build a `mailto:` URL from a draft snapshot. Returns null when there's
+ * neither subject nor body to send. Uses RFC-3986-style percent-encoding via
+ * encodeURIComponent — mail clients (Apple Mail, Gmail web) accept that.
+ *
+ * Recipient handling: tester_id from App Store Connect can be a name, an
+ * email, or "unknown". Only use it as the `to:` when it parses as an email;
+ * otherwise leave the recipient blank and the operator fills it in. Defensive
+ * because TestFlight build feedback often has no email at all.
+ */
+function buildMailtoUrl(opts: {
+  to: string | null;
+  subject: string | null;
+  body: string | null;
+}): string | null {
+  const subject = opts.subject?.trim() ?? '';
+  const body = opts.body ?? '';
+  if (!subject && !body) return null;
+
+  const params = new URLSearchParams();
+  if (subject) params.set('subject', subject);
+  if (body) params.set('body', body);
+  // URLSearchParams encodes spaces as `+`; mailto expects `%20` for both
+  // subject and body so mail clients preserve newlines correctly.
+  const query = params.toString().replace(/\+/g, '%20');
+
+  const recipientIsEmail =
+    opts.to && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(opts.to.trim());
+  const recipient = recipientIsEmail ? encodeURIComponent(opts.to!.trim()) : '';
+
+  return `mailto:${recipient}${query ? '?' + query : ''}`;
 }
 
 async function classifyTaskAgent(prompt: string): Promise<string | null> {
@@ -1476,11 +1509,13 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     }
   });
 
-  // Inbound feedback lane (App Store Connect, Phase 2 read-only).
-  // Phase 3 will add Approve/Promote actions; Phase 4 will add draft
-  // Edit/Reject. Auto-refreshed every 30s on the dashboard.
+  // Inbound feedback lane (App Store Connect).
+  // Phase 4 (Task 4.6): the lane now serves the LEFT-JOINed view that
+  // includes the comms-agent's drafted reply (when present). The SPA
+  // pre-populates its review form from the draft, surfaces a PHI badge,
+  // and offers a re-draft button. Auto-refreshed every 30s.
   app.get('/api/lanes/inbound-feedback', (c) => {
-    const items = getInboundFeedback();
+    const items = getInboundFeedbackWithDrafts();
     return c.json({ items });
   });
 
@@ -1488,6 +1523,15 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
   // contract is unit-tested in skills/github-issues/tests/route.test.ts via
   // the validateApproveRequest helper; this handler is a thin wrapper that
   // adds env resolution and the actual promoteFeedbackRow call.
+  //
+  // Phase 4 (Task 4.6): on success the route also marks the asc_drafts row
+  // approved (if a draft exists) and returns a `mailtoUrl` built from the
+  // draft's subject/body. The frontend opens the operator's default mail
+  // client via `window.location.href = mailtoUrl`. The approve request body
+  // contract has not changed — operator-edited subject/body in the mail
+  // client is out-of-scope for v1; the operator can edit there before
+  // sending. If no draft exists (cron hasn't run yet, or it's paused),
+  // mailtoUrl is null and the GitHub Issue still gets filed.
   app.post('/api/lanes/inbound-feedback/:id/approve', async (c) => {
     const idParam = c.req.param('id');
     const feedbackId = parseFeedbackId(idParam);
@@ -1515,10 +1559,65 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
       return c.json({ ok: false, error: 'GitHub repo env not configured' }, 500);
     }
 
+    const dbPath = path.join(STORE_DIR, 'claudeclaw.db');
+
+    // Snapshot the latest pending draft + tester_id BEFORE promoting so we
+    // can build the mailto URL with the agent's drafted subject/body and
+    // mark the draft row approved after the issue lands. Done with a fresh
+    // better-sqlite3 handle so we don't entangle this with the long-lived
+    // `db` singleton or its prepared-statement cache.
+    interface ApproveDraftSnapshot {
+      draftId: number | null;
+      draftSubject: string | null;
+      draftBody: string | null;
+      testerId: string | null;
+    }
+    let snapshot: ApproveDraftSnapshot = {
+      draftId: null,
+      draftSubject: null,
+      draftBody: null,
+      testerId: null,
+    };
+    try {
+      const Database = (await import('better-sqlite3')).default;
+      const sdb = new Database(dbPath);
+      try {
+        const draftRow = sdb
+          .prepare(
+            `SELECT d.id AS draft_id, d.draft_subject, d.draft_body, f.tester_id
+             FROM asc_feedback f
+             LEFT JOIN asc_drafts d ON d.feedback_id = f.id AND d.status = 'pending_approval'
+             WHERE f.id = ?`,
+          )
+          .get(feedbackId) as
+          | {
+              draft_id: number | null;
+              draft_subject: string | null;
+              draft_body: string | null;
+              tester_id: string | null;
+            }
+          | undefined;
+        if (draftRow) {
+          snapshot = {
+            draftId: draftRow.draft_id,
+            draftSubject: draftRow.draft_subject,
+            draftBody: draftRow.draft_body,
+            testerId: draftRow.tester_id,
+          };
+        }
+      } finally {
+        sdb.close();
+      }
+    } catch (err) {
+      // Non-fatal: the approve flow can still file the issue without the
+      // mailto. Log and continue with the null snapshot.
+      logger.warn({ err, feedbackId }, 'Failed to snapshot draft before approve; mailtoUrl will be null');
+    }
+
     try {
       const promoteFeedbackRow = await getPromoteFeedbackRow();
       const url = await promoteFeedbackRow({
-        dbPath: path.join(STORE_DIR, 'claudeclaw.db'),
+        dbPath,
         feedbackId,
         classification: validated.value.classification,
         title: validated.value.title,
@@ -1526,9 +1625,115 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
         repo: `${owner}/${repo}`,
         priority: validated.value.priority,
       });
-      return c.json({ ok: true, url });
+
+      // After the issue is filed, mark the draft row approved (if there
+      // was one) and build the mailto URL. Both are best-effort: a failure
+      // here MUST NOT undo the GitHub Issue creation.
+      let mailtoUrl: string | null = null;
+      if (snapshot.draftId !== null) {
+        try {
+          const Database = (await import('better-sqlite3')).default;
+          const sdb = new Database(dbPath);
+          try {
+            sdb
+              .prepare(`UPDATE asc_drafts SET status = 'approved' WHERE id = ?`)
+              .run(snapshot.draftId);
+          } finally {
+            sdb.close();
+          }
+        } catch (err) {
+          logger.warn({ err, draftId: snapshot.draftId }, 'Failed to mark asc_drafts row approved');
+        }
+        mailtoUrl = buildMailtoUrl({
+          to: snapshot.testerId,
+          subject: snapshot.draftSubject,
+          body: snapshot.draftBody,
+        });
+      }
+
+      return c.json({ ok: true, url, mailtoUrl });
     } catch (err) {
       logger.error({ err, feedbackId }, 'Failed to promote inbound feedback row');
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: message }, 500);
+    }
+  });
+
+  // Phase 4 (Task 4.6): re-draft a single feedback row. Deletes the existing
+  // pending draft (if any), flips the feedback row back to
+  // pending_classification, and re-runs the comms-agent against just this
+  // row. Same retry budget / failure handling as the cron path.
+  //
+  // Returns { ok, drafted: 0|1, error?: string }. The SPA refreshes the lane
+  // on success. If ANTHROPIC_API_KEY isn't configured the route returns a
+  // 503 — re-drafting requires the LLM and there's no fallback here.
+  app.post('/api/lanes/inbound-feedback/:id/redraft', async (c) => {
+    const idParam = c.req.param('id');
+    const feedbackId = parseFeedbackId(idParam);
+    if (feedbackId === null) {
+      return c.json({ ok: false, error: 'invalid id' }, 400);
+    }
+
+    const env = readEnvFile(['ANTHROPIC_API_KEY']);
+    if (!env.ANTHROPIC_API_KEY) {
+      return c.json({ ok: false, error: 'ANTHROPIC_API_KEY not configured' }, 503);
+    }
+
+    const dbPath = path.join(STORE_DIR, 'claudeclaw.db');
+
+    try {
+      // Reset state so processPendingFeedback's eligibility query picks up
+      // this row: drop the existing pending draft and flip status back to
+      // pending_classification. The comms-agent only drafts rows where
+      // f.status = 'pending_classification' AND no asc_drafts row exists.
+      const Database = (await import('better-sqlite3')).default;
+      const sdb = new Database(dbPath);
+      try {
+        const exists = sdb
+          .prepare(`SELECT id FROM asc_feedback WHERE id = ?`)
+          .get(feedbackId) as { id: number } | undefined;
+        if (!exists) {
+          return c.json({ ok: false, error: `feedback row ${feedbackId} not found` }, 404);
+        }
+        const tx = sdb.transaction(() => {
+          sdb.prepare(`DELETE FROM asc_drafts WHERE feedback_id = ? AND status = 'pending_approval'`).run(feedbackId);
+          sdb
+            .prepare(`UPDATE asc_feedback SET status = 'pending_classification' WHERE id = ?`)
+            .run(feedbackId);
+        });
+        tx();
+      } finally {
+        sdb.close();
+      }
+
+      const commsSkillPath = '../skills/comms-agent/index.js';
+      const commsSkill = (await import(commsSkillPath)) as {
+        processPendingFeedback: (opts: {
+          dbPath: string;
+          runAgent: (p: string) => Promise<string>;
+        }) => Promise<{
+          drafted: number;
+          failed: number;
+          errors: Array<{ feedbackId: number; message: string }>;
+        }>;
+        makeRunAgent: (opts: { apiKey: string; model?: string }) => (prompt: string) => Promise<string>;
+      };
+      const runAgent = commsSkill.makeRunAgent({ apiKey: env.ANTHROPIC_API_KEY });
+      // processPendingFeedback drafts every eligible row in the table. In
+      // practice that's normally a 1-element set if cron has been running;
+      // if other rows have piled up we'll draft them too, which is
+      // acceptable (this endpoint is only invoked by an operator clicking
+      // re-draft, and a more aggressive batch is harmless). A scoped
+      // single-row helper is a future refinement.
+      const result = await commsSkill.processPendingFeedback({ dbPath, runAgent });
+
+      const targetError = result.errors.find((e) => e.feedbackId === feedbackId);
+      if (targetError) {
+        return c.json({ ok: false, error: targetError.message }, 500);
+      }
+      return c.json({ ok: true, drafted: result.drafted, failed: result.failed });
+    } catch (err) {
+      logger.error({ err, feedbackId }, 'Failed to re-draft inbound feedback row');
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ ok: false, error: message }, 500);
     }

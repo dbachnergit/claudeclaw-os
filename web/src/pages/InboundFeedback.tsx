@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { Inbox, ExternalLink } from 'lucide-preact';
+import { ExternalLink, AlertTriangle, RefreshCw } from 'lucide-preact';
 import { PageHeader } from '@/components/PageHeader';
 import { PageState } from '@/components/PageState';
 import { useFetch } from '@/lib/useFetch';
@@ -14,6 +14,20 @@ interface FeedbackRow {
   build_version: string;
   text: string;
   received_at: number;
+  status: 'pending_classification' | 'pending_approval';
+  // Phase 4 (Task 4.6): the comms-agent's drafted reply, joined in by the
+  // backend. When draft_id is null the agent hasn't run yet (cron is on a
+  // 5-min interval) and the form falls back to heuristic defaults.
+  draft_id: number | null;
+  draft_classification: 'bug' | 'feature_request' | 'praise' | 'confusion' | null;
+  draft_subject: string | null;
+  draft_body: string | null;
+  suggested_issue_title: string | null;
+  suggested_issue_body: string | null;
+  suggested_priority: 'p0' | 'p1' | 'p2' | 'p3' | null;
+  phi_flag: 0 | 1 | null;
+  redacted_terms: string[] | null;
+  draft_created_at: number | null;
 }
 
 interface LaneResponse {
@@ -61,17 +75,29 @@ function formatTime(ts: number): string {
 
 interface CardProps {
   row: FeedbackRow;
-  onApproved: (url: string) => void;
+  onApproved: () => void;
+  onRedrafted: () => void;
 }
 
-function Card({ row, onApproved }: CardProps) {
-  const initialClass = defaultClassification(row);
+function Card({ row, onApproved, onRedrafted }: CardProps) {
+  // Pre-populate from the agent's draft when present; fall back to heuristic
+  // defaults when the comms-agent hasn't run yet (5-min cron, may be paused).
+  const hasDraft = row.draft_id !== null;
+  const initialClass: Classification = (row.draft_classification ?? defaultClassification(row)) as Classification;
+  const initialTitle = row.suggested_issue_title ?? defaultTitle(row.text);
+  const initialBody = row.suggested_issue_body ?? defaultBody(row);
+  const initialPriority: Priority = (row.suggested_priority ?? defaultPriority(initialClass)) as Priority;
+
+  const phiFlagged = row.phi_flag === 1;
+  const redactedTerms = row.redacted_terms ?? [];
+
   const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState(defaultTitle(row.text));
-  const [body, setBody] = useState(defaultBody(row));
+  const [title, setTitle] = useState(initialTitle);
+  const [body, setBody] = useState(initialBody);
   const [classification, setClassification] = useState<Classification>(initialClass);
-  const [priority, setPriority] = useState<Priority>(defaultPriority(initialClass));
+  const [priority, setPriority] = useState<Priority>(initialPriority);
   const [submitting, setSubmitting] = useState(false);
+  const [redrafting, setRedrafting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdUrl, setCreatedUrl] = useState<string | null>(null);
 
@@ -79,6 +105,17 @@ function Card({ row, onApproved }: CardProps) {
 
   async function submit(ev: Event) {
     ev.preventDefault();
+
+    // PHI confirm gate. The badge tells the operator the redactor caught
+    // health terms; this dialog forces a deliberate "yes I want to send a
+    // reply about this" before the mailto opens.
+    if (phiFlagged) {
+      const confirmed = window.confirm(
+        'This feedback was flagged as containing PHI. Are you sure you want to approve and send a reply?',
+      );
+      if (!confirmed) return;
+    }
+
     setSubmitting(true);
     setError(null);
     try {
@@ -88,14 +125,20 @@ function Card({ row, onApproved }: CardProps) {
         body,
       };
       if (priority) payload.priority = priority;
-      const res = await apiPost<{ ok: boolean; url?: string; error?: string }>(
+      const res = await apiPost<{ ok: boolean; url?: string; mailtoUrl?: string | null; error?: string }>(
         `/api/lanes/inbound-feedback/${row.id}/approve`,
         payload,
       );
       if (res.ok && res.url) {
         setCreatedUrl(res.url);
         pushToast({ tone: 'success', title: 'Issue created', description: res.url });
-        onApproved(res.url);
+        onApproved();
+        // Open the operator's default mail client with the agent's drafted
+        // subject/body. Done last so the SPA state is settled (toast pushed,
+        // lane refreshed) before the navigation hands off to the OS.
+        if (res.mailtoUrl) {
+          window.location.href = res.mailtoUrl;
+        }
       } else {
         setError(res.error || 'unknown error');
       }
@@ -107,10 +150,65 @@ function Card({ row, onApproved }: CardProps) {
     }
   }
 
+  async function redraft() {
+    setRedrafting(true);
+    setError(null);
+    try {
+      const res = await apiPost<{ ok: boolean; drafted?: number; error?: string }>(
+        `/api/lanes/inbound-feedback/${row.id}/redraft`,
+        {},
+      );
+      if (res.ok) {
+        pushToast({ tone: 'success', title: 'Re-drafted', description: 'Comms agent re-drafted this reply.' });
+        onRedrafted();
+      } else {
+        setError(res.error || 'unknown error');
+      }
+    } catch (e: any) {
+      const msg = e?.body?.error || e?.message || String(e);
+      setError(msg);
+    } finally {
+      setRedrafting(false);
+    }
+  }
+
+  const approveLabel = hasDraft ? 'Approve, send email, and promote' : 'Approve and promote';
+
   return (
     <div class="border border-[var(--color-border)] rounded-lg bg-[var(--color-card)] p-4">
-      <div class="text-[11px] text-[var(--color-text-faint)] mb-1.5">{meta}</div>
-      <div class="text-[13px] text-[var(--color-text)] whitespace-pre-wrap mb-3">{row.text || <span class="italic text-[var(--color-text-muted)]">(empty)</span>}</div>
+      <div class="flex items-start justify-between gap-2 mb-1.5">
+        <div class="text-[11px] text-[var(--color-text-faint)]">{meta}</div>
+        {phiFlagged && (
+          <div
+            class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-yellow-100 text-yellow-900 border border-yellow-300"
+            title={redactedTerms.length > 0 ? `Redacted: ${redactedTerms.join(', ')}` : undefined}
+          >
+            <AlertTriangle size={11} />
+            PHI flagged
+          </div>
+        )}
+      </div>
+      <div class="text-[13px] text-[var(--color-text)] whitespace-pre-wrap mb-3">
+        {row.text || <span class="italic text-[var(--color-text-muted)]">(empty)</span>}
+      </div>
+
+      {phiFlagged && redactedTerms.length > 0 && (
+        <div class="text-[11px] text-[var(--color-text-muted)] mb-2">
+          Redacted: <span class="font-mono">{redactedTerms.join(', ')}</span>
+        </div>
+      )}
+
+      {hasDraft ? (
+        <div class="mb-3 border border-[var(--color-border)] rounded-md bg-[var(--color-bg)] p-3">
+          <div class="text-[10px] uppercase tracking-wider text-[var(--color-text-faint)] mb-1">Draft reply</div>
+          <div class="text-[12px] font-medium text-[var(--color-text)] mb-1">{row.draft_subject}</div>
+          <div class="text-[12px] text-[var(--color-text-muted)] whitespace-pre-wrap">{row.draft_body}</div>
+        </div>
+      ) : (
+        <div class="text-[11px] text-[var(--color-text-muted)] italic mb-3">
+          No draft yet — comms agent runs every 5 minutes.
+        </div>
+      )}
 
       {createdUrl ? (
         <div class="flex items-center gap-1.5 text-[12px] text-[var(--color-status-done)]">
@@ -118,13 +216,28 @@ function Card({ row, onApproved }: CardProps) {
           <a href={createdUrl} target="_blank" rel="noopener" class="underline">{createdUrl}</a>
         </div>
       ) : !open ? (
-        <button
-          type="button"
-          onClick={() => setOpen(true)}
-          class="px-3 py-1.5 rounded-md text-[12px] font-medium bg-[var(--color-elevated)] text-[var(--color-text)] hover:bg-[var(--color-card-hover,var(--color-elevated))] border border-[var(--color-border)] transition-colors"
-        >
-          Approve and promote
-        </button>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setOpen(true)}
+            class="px-3 py-1.5 rounded-md text-[12px] font-medium bg-[var(--color-elevated)] text-[var(--color-text)] hover:bg-[var(--color-card-hover,var(--color-elevated))] border border-[var(--color-border)] transition-colors"
+          >
+            {approveLabel}
+          </button>
+          <button
+            type="button"
+            onClick={redraft}
+            disabled={redrafting}
+            class="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-[12px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-elevated)] border border-transparent disabled:opacity-40 transition-colors"
+            title="Ask the comms agent to draft this reply again"
+          >
+            <RefreshCw size={12} class={redrafting ? 'animate-spin' : ''} />
+            {redrafting ? 'Re-drafting…' : 'Re-draft'}
+          </button>
+          {error && (
+            <div class="text-[11px] text-[var(--color-status-failed)] font-mono">Failed: {error}</div>
+          )}
+        </div>
       ) : (
         <form onSubmit={submit} class="flex flex-col gap-2">
           <label class="flex flex-col gap-1">
@@ -188,7 +301,17 @@ function Card({ row, onApproved }: CardProps) {
               disabled={submitting || !title.trim()}
               class="px-3 py-1.5 rounded-md text-[12px] font-medium bg-[var(--color-accent,#7c5cff)] text-white hover:opacity-90 disabled:opacity-40 transition-opacity"
             >
-              {submitting ? 'Submitting…' : 'Submit'}
+              {submitting ? 'Submitting…' : approveLabel}
+            </button>
+            <button
+              type="button"
+              onClick={redraft}
+              disabled={submitting || redrafting}
+              class="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-[12px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-elevated)] disabled:opacity-40 transition-colors"
+              title="Ask the comms agent to draft this reply again"
+            >
+              <RefreshCw size={12} class={redrafting ? 'animate-spin' : ''} />
+              {redrafting ? 'Re-drafting…' : 'Re-draft'}
             </button>
             <button
               type="button"
@@ -228,7 +351,12 @@ export function InboundFeedback() {
         <div class="flex-1 overflow-y-auto px-6 py-4">
           <div class="flex flex-col gap-3 max-w-3xl">
             {items.map((row) => (
-              <Card key={row.id} row={row} onApproved={() => refresh()} />
+              <Card
+                key={row.id}
+                row={row}
+                onApproved={() => refresh()}
+                onRedrafted={() => refresh()}
+              />
             ))}
           </div>
         </div>
