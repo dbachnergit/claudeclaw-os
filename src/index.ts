@@ -399,6 +399,115 @@ async function main(): Promise<void> {
       setTimeout(() => void runAscPoll(), ASC_INITIAL_DELAY_MS);
       setInterval(() => void runAscPoll(), ASC_INTERVAL_MS);
       logger.info('App Store Connect poll enabled (every 30 min)');
+
+      // Comms-agent draft cron. Runs every 5 min in the main process. First
+      // tick fires 30s after startup so the ASC poll's initial-delay window
+      // has time to finish (the comms cron only ever drafts rows the ASC
+      // poll has already inserted, so racing the first ASC fire is wasted
+      // work). Three consecutive failures pause drafting for the rest of
+      // this process lifetime and send one Telegram alert. If
+      // ANTHROPIC_API_KEY is unset, the cron is skipped entirely (logged
+      // once) — drafting is impossible without it. The runAgent is rebuilt
+      // when the key changes between ticks so a manual .env rotation takes
+      // effect without a restart.
+      const initialAnthropicEnv = readEnvFile(['ANTHROPIC_API_KEY']);
+      if (!initialAnthropicEnv.ANTHROPIC_API_KEY) {
+        logger.warn(
+          'Comms-agent draft cron disabled: ANTHROPIC_API_KEY not set in .env',
+        );
+      } else {
+        const commsSkillPath = '../skills/comms-agent/index.js';
+        const commsSkill = (await import(commsSkillPath)) as {
+          processPendingFeedback: (opts: {
+            dbPath: string;
+            runAgent: (p: string) => Promise<string>;
+          }) => Promise<{
+            drafted: number;
+            failed: number;
+            errors: Array<{ feedbackId: number; message: string }>;
+          }>;
+          makeRunAgent: (opts: {
+            apiKey: string;
+            model?: string;
+          }) => (prompt: string) => Promise<string>;
+        };
+        const { processPendingFeedback, makeRunAgent } = commsSkill;
+
+        let commsConsecutiveFailures = 0;
+        let commsPaused = false;
+        let lastApiKey: string = initialAnthropicEnv.ANTHROPIC_API_KEY;
+        let runAgent = makeRunAgent({ apiKey: lastApiKey });
+        const commsDbPath = path.join(STORE_DIR, 'claudeclaw.db');
+        const COMMS_FAILURE_THRESHOLD = 3;
+        const COMMS_INTERVAL_MS = 5 * 60 * 1000;
+        const COMMS_INITIAL_DELAY_MS = 30 * 1000;
+
+        const runCommsTick = async (): Promise<void> => {
+          if (commsPaused) return;
+          try {
+            const env = readEnvFile(['ANTHROPIC_API_KEY']);
+            const currentKey = env.ANTHROPIC_API_KEY;
+            if (!currentKey) {
+              commsConsecutiveFailures++;
+              logger.warn(
+                { consecutiveFailures: commsConsecutiveFailures },
+                'Comms-agent tick: ANTHROPIC_API_KEY no longer present',
+              );
+            } else {
+              if (currentKey !== lastApiKey) {
+                lastApiKey = currentKey;
+                runAgent = makeRunAgent({ apiKey: currentKey });
+                logger.info('Comms-agent runAgent rebuilt after API key rotation');
+              }
+              const result = await processPendingFeedback({ dbPath: commsDbPath, runAgent });
+              if (result.failed > 0) {
+                commsConsecutiveFailures++;
+                logger.warn(
+                  {
+                    drafted: result.drafted,
+                    failed: result.failed,
+                    errors: result.errors,
+                    consecutiveFailures: commsConsecutiveFailures,
+                  },
+                  'Comms-agent tick completed with failures',
+                );
+              } else {
+                if (result.drafted > 0) {
+                  commsConsecutiveFailures = 0;
+                  logger.info({ drafted: result.drafted }, 'Comms-agent drafted');
+                } else {
+                  // Clean idle tick: nothing to do, no errors. Reset the
+                  // strike counter (a previous transient failure shouldn't
+                  // accumulate across long quiet periods) and log at debug.
+                  commsConsecutiveFailures = 0;
+                  logger.debug('Comms-agent tick idle (no pending rows)');
+                }
+              }
+            }
+          } catch (err) {
+            commsConsecutiveFailures++;
+            logger.error(
+              { err, consecutiveFailures: commsConsecutiveFailures },
+              'Comms-agent tick threw',
+            );
+          }
+          if (commsConsecutiveFailures >= COMMS_FAILURE_THRESHOLD && !commsPaused) {
+            commsPaused = true;
+            await bot.api
+              .sendMessage(
+                ALLOWED_CHAT_ID,
+                `Comms-agent draft cron failed ${COMMS_FAILURE_THRESHOLD} times in a row. Drafting paused until the bot is restarted. Check /tmp/claudeclaw.err for details.`,
+              )
+              .catch((err: unknown) =>
+                logger.error({ err }, 'Failed to send comms-agent pause alert'),
+              );
+          }
+        };
+
+        setTimeout(() => void runCommsTick(), COMMS_INITIAL_DELAY_MS);
+        setInterval(() => void runCommsTick(), COMMS_INTERVAL_MS);
+        logger.info('Comms-agent draft cron enabled (every 5 min)');
+      }
     }
   }
 

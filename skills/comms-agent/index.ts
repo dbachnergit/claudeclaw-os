@@ -15,6 +15,10 @@ import { redactPhi } from './phi-redact.js';
 
 export { redactPhi } from './phi-redact.js';
 export type { RedactionResult } from './phi-redact.js';
+export { processPendingFeedback } from './process.js';
+export type { ProcessOptions, ProcessResult } from './process.js';
+export { makeRunAgent } from './runtime.js';
+export type { RuntimeOptions } from './runtime.js';
 
 export interface DraftInput {
   feedbackText: string;
