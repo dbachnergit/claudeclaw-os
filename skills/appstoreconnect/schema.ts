@@ -26,4 +26,14 @@ export function applySchema(db: Database.Database): void {
     );
     db.exec(linkSql);
   }
+
+  // 2026-05-08 asc-drafts migration: ephemeral working-state table holding
+  // comms-agent drafts awaiting human approval. The SQL is self-idempotent
+  // (CREATE TABLE / CREATE INDEX IF NOT EXISTS), so it's safe to run on
+  // every applySchema call without a PRAGMA guard.
+  const draftsSql = readFileSync(
+    join(here, '..', '..', 'store', 'migrations', '2026-05-08-asc-drafts.sql'),
+    'utf8'
+  );
+  db.exec(draftsSql);
 }
