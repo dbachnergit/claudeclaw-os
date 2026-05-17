@@ -1,2 +1,2 @@
-pipecat-ai[websocket,deepgram,cartesia,silero]==0.0.108
+pipecat-ai[websocket,deepgram,cartesia,silero,google]==0.0.108
 python-dotenv>=1.0.0
