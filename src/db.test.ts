@@ -515,5 +515,89 @@ describe('database', () => {
       expect(row).toBeDefined();
       expect(row!.redacted_terms).toEqual([]);
     });
+
+    // v1.1 polish: the lane sorts by f.received_at DESC so newly-arrived
+    // tester feedback always lands at the top regardless of whether a
+    // draft has been written yet. Previously COALESCE on draft time
+    // buried fresh undrafted rows beneath older drafted ones.
+    it('sorts by f.received_at DESC regardless of draft state', () => {
+      const oldId = _testInsertAscFeedback({
+        asc_id: 'a-old',
+        text: 'old feedback',
+        status: 'pending_approval',
+        received_at: 1_700_000_000,
+      });
+      // Old row has a freshly-created draft. Under the old COALESCE rule
+      // this would still float to the top.
+      _testInsertAscDraft({
+        feedback_id: oldId,
+        status: 'pending_approval',
+        created_at: 1_700_999_999,
+      });
+      const newId = _testInsertAscFeedback({
+        asc_id: 'a-new',
+        text: 'new feedback, no draft yet',
+        status: 'pending_classification',
+        received_at: 1_700_500_000,
+      });
+      const items = getInboundFeedbackWithDrafts();
+      const newIdx = items.findIndex((r) => r.id === newId);
+      const oldIdx = items.findIndex((r) => r.id === oldId);
+      expect(newIdx).toBeGreaterThanOrEqual(0);
+      expect(oldIdx).toBeGreaterThanOrEqual(0);
+      // newId has the larger received_at and must come first.
+      expect(newIdx).toBeLessThan(oldIdx);
+    });
+
+    it('parses screenshots_json into a typed array', () => {
+      const fid = _testInsertAscFeedback({
+        asc_id: 'a-with-shots',
+        status: 'pending_classification',
+        screenshots_json: JSON.stringify([
+          {
+            url: 'https://example.apple.com/a.png',
+            width: 1170,
+            height: 2532,
+            expirationDate: '2026-05-21T00:00:00Z',
+          },
+          {
+            url: 'https://example.apple.com/b.png',
+            width: 1170,
+            height: 2532,
+            expirationDate: '2026-05-21T00:00:00Z',
+          },
+        ]),
+      });
+      const items = getInboundFeedbackWithDrafts();
+      const row = items.find((r) => r.id === fid);
+      expect(row).toBeDefined();
+      expect(row!.screenshots).toHaveLength(2);
+      expect(row!.screenshots[0].url).toBe('https://example.apple.com/a.png');
+      expect(row!.screenshots[0].width).toBe(1170);
+      expect(row!.screenshots[0].height).toBe(2532);
+      expect(row!.screenshots[0].expirationDate).toBe('2026-05-21T00:00:00Z');
+    });
+
+    it('returns screenshots as [] when the column is empty, malformed, or shape-mismatched', () => {
+      const emptyId = _testInsertAscFeedback({
+        asc_id: 'a-empty-shots',
+        status: 'pending_classification',
+        screenshots_json: '[]',
+      });
+      const badJsonId = _testInsertAscFeedback({
+        asc_id: 'a-bad-shots-json',
+        status: 'pending_classification',
+        screenshots_json: 'not-json',
+      });
+      const wrongShapeId = _testInsertAscFeedback({
+        asc_id: 'a-wrong-shape',
+        status: 'pending_classification',
+        screenshots_json: JSON.stringify([{ url: 'no-dimensions' }]),
+      });
+      const items = getInboundFeedbackWithDrafts();
+      expect(items.find((r) => r.id === emptyId)!.screenshots).toEqual([]);
+      expect(items.find((r) => r.id === badJsonId)!.screenshots).toEqual([]);
+      expect(items.find((r) => r.id === wrongShapeId)!.screenshots).toEqual([]);
+    });
   });
 });

@@ -1312,8 +1312,17 @@ export function getInboundFeedback(): InboundFeedbackRow[] {
 //     These rows return draft_id: null and the operator falls back to the
 //     heuristic defaults in the SPA.
 //   - 'pending_approval': feedback has a draft awaiting human approval.
+/** One entry of `asc_feedback.screenshots_json`. Mirrors Apple's CDN payload. */
+export interface AscScreenshot {
+  url: string;
+  width: number;
+  height: number;
+  expirationDate: string;
+}
+
 export interface InboundFeedbackWithDraftRow extends InboundFeedbackRow {
   status: string;
+  screenshots: AscScreenshot[];
   draft_id: number | null;
   draft_classification: string | null;
   draft_subject: string | null;
@@ -1328,9 +1337,15 @@ export interface InboundFeedbackWithDraftRow extends InboundFeedbackRow {
 
 export function getInboundFeedbackWithDrafts(): InboundFeedbackWithDraftRow[] {
   try {
+    // ORDER BY f.received_at DESC keeps the freshest tester feedback at the
+    // top of the inbox regardless of draft state. Previously this used
+    // COALESCE(d.created_at, f.received_at) which mixed "feedback arrived"
+    // with "we drafted it" and silently buried new undrafted rows below
+    // older drafted ones.
     const rows = db.prepare(`
       SELECT
         f.id, f.asc_id, f.type, f.tester_id, f.build_version, f.text, f.received_at, f.status,
+        f.screenshots_json,
         d.id AS draft_id,
         d.classification AS draft_classification,
         d.draft_subject,
@@ -1344,14 +1359,23 @@ export function getInboundFeedbackWithDrafts(): InboundFeedbackWithDraftRow[] {
       FROM asc_feedback f
       LEFT JOIN asc_drafts d ON d.feedback_id = f.id AND d.status = 'pending_approval'
       WHERE f.status IN ('pending_classification', 'pending_approval')
-      ORDER BY COALESCE(d.created_at, f.received_at) DESC
+      ORDER BY f.received_at DESC
       LIMIT 200
-    `).all() as Array<Omit<InboundFeedbackWithDraftRow, 'redacted_terms'> & { redacted_terms: string | null }>;
+    `).all() as Array<
+      Omit<InboundFeedbackWithDraftRow, 'redacted_terms' | 'screenshots'> & {
+        redacted_terms: string | null;
+        screenshots_json: string | null;
+      }
+    >;
 
-    return rows.map((r) => ({
-      ...r,
-      redacted_terms: decodeRedactedTerms(r.redacted_terms),
-    }));
+    return rows.map((r) => {
+      const { screenshots_json, redacted_terms, ...rest } = r;
+      return {
+        ...rest,
+        screenshots: decodeScreenshots(screenshots_json),
+        redacted_terms: decodeRedactedTerms(redacted_terms),
+      };
+    });
   } catch {
     return [];
   }
@@ -1364,19 +1388,21 @@ export function _testInsertAscFeedback(row: {
   tester_id?: string;
   build_version?: string;
   text?: string;
+  screenshots_json?: string;
   status?: 'pending_classification' | 'pending_approval' | 'approved' | 'rejected' | 'sent' | 'error';
   received_at?: number;
 }): number {
   const now = Math.floor(Date.now() / 1000);
   const result = db.prepare(`
     INSERT INTO asc_feedback (asc_id, type, tester_id, build_version, text, screenshots_json, raw_json, status, received_at, fetched_at)
-    VALUES (?, ?, ?, ?, ?, '[]', '{}', ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)
   `).run(
     row.asc_id,
     row.type ?? 'testflight_feedback',
     row.tester_id ?? 'tester',
     row.build_version ?? '71',
     row.text ?? '',
+    row.screenshots_json ?? '[]',
     row.status ?? 'pending_classification',
     row.received_at ?? now,
     now,
@@ -1426,6 +1452,42 @@ function decodeRedactedTerms(raw: string | null): string[] | null {
       return parsed as string[];
     }
     return [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Defensively decode `asc_feedback.screenshots_json` into a typed array.
+ * Returns [] for null, malformed JSON, non-array shapes, or entries that
+ * don't match the Apple CDN payload shape. Same fail-soft pattern as
+ * `decodeRedactedTerms` — the dashboard should never blow up because the
+ * column has an unexpected shape.
+ */
+function decodeScreenshots(raw: string | null): AscScreenshot[] {
+  if (raw === null || raw === undefined) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: AscScreenshot[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const o = item as Record<string, unknown>;
+      if (
+        typeof o.url === 'string' &&
+        typeof o.width === 'number' &&
+        typeof o.height === 'number' &&
+        typeof o.expirationDate === 'string'
+      ) {
+        out.push({
+          url: o.url,
+          width: o.width,
+          height: o.height,
+          expirationDate: o.expirationDate,
+        });
+      }
+    }
+    return out;
   } catch {
     return [];
   }

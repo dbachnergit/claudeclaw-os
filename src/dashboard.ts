@@ -1739,6 +1739,56 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     }
   });
 
+  // v1.1 polish: dismiss a single inbound feedback row from the inbox.
+  // Flips `asc_feedback.status` to 'rejected' and the associated draft (if
+  // any) to 'rejected' so the lane query — which filters drafts to
+  // status='pending_approval' and feedback to pending_classification /
+  // pending_approval — drops the row from the SPA list. Nothing is deleted
+  // from the database; this is a hide-from-inbox action, not a wipe.
+  //
+  // Both updates run inside a single transaction so a partial failure can
+  // never leave the draft and feedback rows in inconsistent states.
+  app.post('/api/lanes/inbound-feedback/:id/dismiss', async (c) => {
+    const idParam = c.req.param('id');
+    const feedbackId = parseFeedbackId(idParam);
+    if (feedbackId === null) {
+      return c.json({ ok: false, error: 'invalid id' }, 400);
+    }
+
+    const dbPath = path.join(STORE_DIR, 'claudeclaw.db');
+
+    try {
+      const Database = (await import('better-sqlite3')).default;
+      const sdb = new Database(dbPath);
+      try {
+        const exists = sdb
+          .prepare(`SELECT id FROM asc_feedback WHERE id = ?`)
+          .get(feedbackId) as { id: number } | undefined;
+        if (!exists) {
+          return c.json({ ok: false, error: `feedback row ${feedbackId} not found` }, 404);
+        }
+        const tx = sdb.transaction(() => {
+          sdb
+            .prepare(`UPDATE asc_feedback SET status = 'rejected' WHERE id = ?`)
+            .run(feedbackId);
+          sdb
+            .prepare(
+              `UPDATE asc_drafts SET status = 'rejected' WHERE feedback_id = ? AND status = 'pending_approval'`,
+            )
+            .run(feedbackId);
+        });
+        tx();
+      } finally {
+        sdb.close();
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      logger.error({ err, feedbackId }, 'Failed to dismiss inbound feedback row');
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: message }, 500);
+    }
+  });
+
   // Scheduled tasks
   app.get('/api/tasks', (c) => {
     const tasks = getAllScheduledTasks();

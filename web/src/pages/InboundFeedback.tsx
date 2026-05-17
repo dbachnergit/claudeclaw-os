@@ -1,10 +1,17 @@
 import { useState } from 'preact/hooks';
-import { ExternalLink, AlertTriangle, RefreshCw } from 'lucide-preact';
+import { ExternalLink, AlertTriangle, RefreshCw, X } from 'lucide-preact';
 import { PageHeader } from '@/components/PageHeader';
 import { PageState } from '@/components/PageState';
 import { useFetch } from '@/lib/useFetch';
 import { apiPost } from '@/lib/api';
 import { pushToast } from '@/lib/toasts';
+
+interface Screenshot {
+  url: string;
+  width: number;
+  height: number;
+  expirationDate: string;
+}
 
 interface FeedbackRow {
   id: number;
@@ -15,6 +22,10 @@ interface FeedbackRow {
   text: string;
   received_at: number;
   status: 'pending_classification' | 'pending_approval';
+  // v1.1: signed Apple CDN URLs for attached screenshots. URLs expire in
+  // ~7 days; expired clicks render the browser's broken-image icon, which
+  // is acceptable v1.1 behavior (no preflight, no refresh).
+  screenshots: Screenshot[];
   // Phase 4 (Task 4.6): the comms-agent's drafted reply, joined in by the
   // backend. When draft_id is null the agent hasn't run yet (cron is on a
   // 5-min interval) and the form falls back to heuristic defaults.
@@ -29,6 +40,8 @@ interface FeedbackRow {
   redacted_terms: string[] | null;
   draft_created_at: number | null;
 }
+
+const SCREENSHOT_THUMB_LIMIT = 4;
 
 interface LaneResponse {
   items: FeedbackRow[];
@@ -77,9 +90,46 @@ interface CardProps {
   row: FeedbackRow;
   onApproved: () => void;
   onRedrafted: () => void;
+  onDismissed: () => void;
 }
 
-function Card({ row, onApproved, onRedrafted }: CardProps) {
+function ScreenshotStrip({ shots }: { shots: Screenshot[] }) {
+  if (shots.length === 0) return null;
+  const visible = shots.slice(0, SCREENSHOT_THUMB_LIMIT);
+  const overflow = shots.length - visible.length;
+  return (
+    <div class="flex flex-wrap gap-2 mb-3">
+      {visible.map((s, i) => (
+        <a
+          key={`${s.url}-${i}`}
+          href={s.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="block rounded-md overflow-hidden border border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-accent,#7c5cff)] transition-colors"
+          title={`Screenshot ${i + 1} (${s.width}x${s.height})`}
+        >
+          <img
+            src={s.url}
+            alt={`Screenshot ${i + 1}`}
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            class="block h-[120px] w-auto object-contain"
+          />
+        </a>
+      ))}
+      {overflow > 0 && (
+        <div
+          class="flex items-center justify-center h-[120px] min-w-[60px] px-3 rounded-md border border-dashed border-[var(--color-border)] text-[12px] text-[var(--color-text-muted)] bg-[var(--color-bg)]"
+          title={`${overflow} additional screenshot${overflow === 1 ? '' : 's'} not shown`}
+        >
+          +{overflow} more
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Card({ row, onApproved, onRedrafted, onDismissed }: CardProps) {
   // Pre-populate from the agent's draft when present; fall back to heuristic
   // defaults when the comms-agent hasn't run yet (5-min cron, may be paused).
   const hasDraft = row.draft_id !== null;
@@ -98,6 +148,7 @@ function Card({ row, onApproved, onRedrafted }: CardProps) {
   const [priority, setPriority] = useState<Priority>(initialPriority);
   const [submitting, setSubmitting] = useState(false);
   const [redrafting, setRedrafting] = useState(false);
+  const [dismissing, setDismissing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdUrl, setCreatedUrl] = useState<string | null>(null);
 
@@ -172,6 +223,36 @@ function Card({ row, onApproved, onRedrafted }: CardProps) {
     }
   }
 
+  async function dismiss() {
+    // Guard against an accidental click: operators have asked for a
+    // confirm here because the inbox is the only surface where these rows
+    // live. The row is not deleted; status flips to 'rejected' and the
+    // lane query hides it.
+    const ok = window.confirm(
+      'Remove this feedback from the inbox? It will not be deleted from the database.',
+    );
+    if (!ok) return;
+    setDismissing(true);
+    setError(null);
+    try {
+      const res = await apiPost<{ ok: boolean; error?: string }>(
+        `/api/lanes/inbound-feedback/${row.id}/dismiss`,
+        {},
+      );
+      if (res.ok) {
+        pushToast({ tone: 'success', title: 'Dismissed', description: 'Removed from the inbox.' });
+        onDismissed();
+      } else {
+        setError(res.error || 'unknown error');
+      }
+    } catch (e: any) {
+      const msg = e?.body?.error || e?.message || String(e);
+      setError(msg);
+    } finally {
+      setDismissing(false);
+    }
+  }
+
   const approveLabel = hasDraft ? 'Approve, send email, and promote' : 'Approve and promote';
 
   return (
@@ -188,25 +269,43 @@ function Card({ row, onApproved, onRedrafted }: CardProps) {
           </div>
         )}
       </div>
-      <div class="text-[13px] text-[var(--color-text)] whitespace-pre-wrap mb-3">
-        {row.text || <span class="italic text-[var(--color-text-muted)]">(empty)</span>}
-      </div>
+
+      {/* v1.1: Apple's attached screenshots (signed CDN URLs, ~7d TTL). */}
+      <ScreenshotStrip shots={row.screenshots} />
+
+      {hasDraft ? (
+        // Side-by-side: original feedback on the left, agent's drafted
+        // reply on the right. Stacks vertically below 768px. The form
+        // (when open) still owns its own editable copy below.
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+          <div class="border border-[var(--color-border)] rounded-md bg-[var(--color-bg)] p-3">
+            <div class="text-[10px] uppercase tracking-wider text-[var(--color-text-faint)] mb-1">Feedback</div>
+            <div class="text-[13px] text-[var(--color-text)] whitespace-pre-wrap">
+              {row.text || <span class="italic text-[var(--color-text-muted)]">(empty)</span>}
+            </div>
+          </div>
+          <div class="border border-[var(--color-border)] rounded-md bg-[var(--color-bg)] p-3">
+            <div class="text-[10px] uppercase tracking-wider text-[var(--color-text-faint)] mb-1">Drafted reply</div>
+            <div class="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text)] mb-1">
+              {row.draft_subject}
+            </div>
+            <div class="text-[12px] text-[var(--color-text-muted)] whitespace-pre-wrap">{row.draft_body}</div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div class="text-[13px] text-[var(--color-text)] whitespace-pre-wrap mb-3">
+            {row.text || <span class="italic text-[var(--color-text-muted)]">(empty)</span>}
+          </div>
+          <div class="text-[11px] text-[var(--color-text-muted)] italic mb-3">
+            No draft yet — comms agent runs every 5 minutes.
+          </div>
+        </>
+      )}
 
       {phiFlagged && redactedTerms.length > 0 && (
         <div class="text-[11px] text-[var(--color-text-muted)] mb-2">
           Redacted: <span class="font-mono">{redactedTerms.join(', ')}</span>
-        </div>
-      )}
-
-      {hasDraft ? (
-        <div class="mb-3 border border-[var(--color-border)] rounded-md bg-[var(--color-bg)] p-3">
-          <div class="text-[10px] uppercase tracking-wider text-[var(--color-text-faint)] mb-1">Draft reply</div>
-          <div class="text-[12px] font-medium text-[var(--color-text)] mb-1">{row.draft_subject}</div>
-          <div class="text-[12px] text-[var(--color-text-muted)] whitespace-pre-wrap">{row.draft_body}</div>
-        </div>
-      ) : (
-        <div class="text-[11px] text-[var(--color-text-muted)] italic mb-3">
-          No draft yet — comms agent runs every 5 minutes.
         </div>
       )}
 
@@ -216,7 +315,7 @@ function Card({ row, onApproved, onRedrafted }: CardProps) {
           <a href={createdUrl} target="_blank" rel="noopener" class="underline">{createdUrl}</a>
         </div>
       ) : !open ? (
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setOpen(true)}
@@ -227,12 +326,22 @@ function Card({ row, onApproved, onRedrafted }: CardProps) {
           <button
             type="button"
             onClick={redraft}
-            disabled={redrafting}
+            disabled={redrafting || dismissing}
             class="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-[12px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-elevated)] border border-transparent disabled:opacity-40 transition-colors"
             title="Ask the comms agent to draft this reply again"
           >
             <RefreshCw size={12} class={redrafting ? 'animate-spin' : ''} />
             {redrafting ? 'Re-drafting…' : 'Re-draft'}
+          </button>
+          <button
+            type="button"
+            onClick={dismiss}
+            disabled={dismissing || redrafting}
+            class="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-[12px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-elevated)] border border-transparent disabled:opacity-40 transition-colors"
+            title="Remove this feedback from the inbox (does not delete from database)"
+          >
+            <X size={12} />
+            {dismissing ? 'Dismissing…' : 'Dismiss'}
           </button>
           {error && (
             <div class="text-[11px] text-[var(--color-status-failed)] font-mono">Failed: {error}</div>
@@ -332,6 +441,12 @@ export function InboundFeedback() {
   const { data, loading, error, refresh } = useFetch<LaneResponse>('/api/lanes/inbound-feedback', 30_000);
   const items = data?.items ?? [];
 
+  // When at least one row has a draft, widen the column so the
+  // feedback/draft two-column layout breathes. Undrafted-only lists stay
+  // tight at max-w-3xl.
+  const anyDrafted = items.some((it) => it.draft_id !== null);
+  const columnWidth = anyDrafted ? 'max-w-5xl' : 'max-w-3xl';
+
   return (
     <div class="flex flex-col h-full">
       <PageHeader
@@ -349,13 +464,14 @@ export function InboundFeedback() {
       )}
       {items.length > 0 && (
         <div class="flex-1 overflow-y-auto px-6 py-4">
-          <div class="flex flex-col gap-3 max-w-3xl">
+          <div class={`flex flex-col gap-3 ${columnWidth}`}>
             {items.map((row) => (
               <Card
                 key={row.id}
                 row={row}
                 onApproved={() => refresh()}
                 onRedrafted={() => refresh()}
+                onDismissed={() => refresh()}
               />
             ))}
           </div>
