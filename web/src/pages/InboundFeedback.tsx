@@ -152,7 +152,8 @@ function Card({ row, onApproved, onRedrafted, onDismissed }: CardProps) {
   const [error, setError] = useState<string | null>(null);
   const [createdUrl, setCreatedUrl] = useState<string | null>(null);
 
-  const meta = `${TYPE_LABEL[row.type]} · build ${row.build_version || '?'} · ${row.tester_id || '?'} · ${formatTime(row.received_at)}`;
+  const meta = `${TYPE_LABEL[row.type]} · ${row.tester_id || '?'} · ${formatTime(row.received_at)}`;
+  const buildLabel = row.build_version ? `Build ${row.build_version}` : 'Build ?';
 
   async function submit(ev: Event) {
     ev.preventDefault();
@@ -259,15 +260,23 @@ function Card({ row, onApproved, onRedrafted, onDismissed }: CardProps) {
     <div class="border border-[var(--color-border)] rounded-lg bg-[var(--color-card)] p-4">
       <div class="flex items-start justify-between gap-2 mb-1.5">
         <div class="text-[11px] text-[var(--color-text-faint)]">{meta}</div>
-        {phiFlagged && (
+        <div class="flex items-center gap-2 shrink-0">
           <div
-            class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-yellow-100 text-yellow-900 border border-yellow-300"
-            title={redactedTerms.length > 0 ? `Redacted: ${redactedTerms.join(', ')}` : undefined}
+            class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-[var(--color-elevated)] text-[var(--color-text)] border border-[var(--color-border)] tabular-nums"
+            title={`TestFlight build ${row.build_version || 'unknown'}`}
           >
-            <AlertTriangle size={11} />
-            PHI flagged
+            {buildLabel}
           </div>
-        )}
+          {phiFlagged && (
+            <div
+              class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-yellow-100 text-yellow-900 border border-yellow-300"
+              title={redactedTerms.length > 0 ? `Redacted: ${redactedTerms.join(', ')}` : undefined}
+            >
+              <AlertTriangle size={11} />
+              PHI flagged
+            </div>
+          )}
+        </div>
       </div>
 
       {/* v1.1: Apple's attached screenshots (signed CDN URLs, ~7d TTL). */}
