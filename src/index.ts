@@ -6,7 +6,25 @@ import { createBot } from './bot.js';
 import { checkPendingMigrations } from './migrations.js';
 import { ALLOWED_CHAT_ID, activeBotToken, STORE_DIR, PROJECT_ROOT, CLAUDECLAW_CONFIG, GOOGLE_API_KEY, setAgentOverrides, SECURITY_PIN_HASH, IDLE_LOCK_MINUTES, EMERGENCY_KILL_PHRASE, WARROOM_ENABLED, WARROOM_PORT } from './config.js';
 import { startDashboard } from './dashboard.js';
-import { initDatabase, cleanupOldMissionTasks, insertAuditLog, applyAscFeedbackSchemaIfMissing } from './db.js';
+import { runAgent } from './agent.js';
+import {
+  initDatabase,
+  cleanupOldMissionTasks,
+  insertAuditLog,
+  applyAscFeedbackSchemaIfMissing,
+  resetStuckDevTasks,
+  getDevTaskByIssue,
+  createDevTask,
+  claimNextDevTask,
+  completeDevTask,
+  setDevTaskWorktree,
+  getTerminalDevTasksWithWorktree,
+  clearDevTaskWorktree,
+  setDevTaskSpecDrafted,
+  setDevTaskStage,
+  incrementDevTaskReviewRounds,
+  addDevTaskCost,
+} from './db.js';
 import { initSecurity, setAuditCallback } from './security.js';
 import { logger } from './logger.js';
 import { cleanupOldUploads } from './media.js';
@@ -18,6 +36,31 @@ import { initOrchestrator } from './orchestrator.js';
 import { initScheduler } from './scheduler.js';
 import { setTelegramConnected, setBotInfo } from './state.js';
 import { getVenvPython, killProcess } from './platform.js';
+
+// Structural restatements of two dev-agent skill types. A src/ file cannot
+// statically import from skills/ (separate rootDir), so the skill is reached
+// at runtime via a dynamic import (the comms-cron pattern) and these mirror
+// its shapes. DevProcessorDb is derived from the real src/db.ts helpers via
+// `typeof`, so the injected bundle is guaranteed to match field-for-field.
+type DevExec = (
+  cmd: string,
+  args: string[],
+  opts?: { signal?: AbortSignal; timeoutMs?: number; cwd?: string },
+) => Promise<{ stdout: string; stderr: string; code: number }>;
+
+type DevProcessorDb = {
+  getDevTaskByIssue: typeof getDevTaskByIssue;
+  createDevTask: typeof createDevTask;
+  claimNextDevTask: typeof claimNextDevTask;
+  completeDevTask: typeof completeDevTask;
+  setDevTaskWorktree: typeof setDevTaskWorktree;
+  getTerminalDevTasksWithWorktree: typeof getTerminalDevTasksWithWorktree;
+  clearDevTaskWorktree: typeof clearDevTaskWorktree;
+  setDevTaskSpecDrafted: typeof setDevTaskSpecDrafted;
+  setDevTaskStage: typeof setDevTaskStage;
+  incrementDevTaskReviewRounds: typeof incrementDevTaskReviewRounds;
+  addDevTaskCost: typeof addDevTaskCost;
+};
 
 // Parse --agent flag
 const agentFlagIndex = process.argv.indexOf('--agent');
@@ -192,7 +235,31 @@ async function main(): Promise<void> {
 
   // Dashboard only runs in the main bot process
   if (AGENT_ID === 'main') {
-    startDashboard(bot.api);
+    // The /dev reject handler strips GitHub labels, but the dashboard (src/)
+    // cannot import the dev-agent skill's gh.ts. Inject the gh mechanism here:
+    // a closure that resolves the repo from .env and calls the skill's
+    // swapLabel through a runtime dynamic import. Undefined when DEV_AGENT_REPO
+    // is unset, in which case reject still does its DB compare-and-swap and the
+    // watcher self-heals the stray label on a later tick.
+    const { readEnvFile: readDevRepoEnv } = await import('./env.js');
+    const devAgentRepo = (readDevRepoEnv(['DEV_AGENT_REPO']).DEV_AGENT_REPO || '').trim();
+    const stripIssueLabels = devAgentRepo
+      ? async (issueNumber: number, labels: string[]): Promise<void> => {
+          const ghPath = '../skills/dev-agent/gh.js';
+          const gh = (await import(ghPath)) as {
+            runExec: DevExec;
+            swapLabel: (
+              repo: string,
+              issue: number,
+              remove: string[],
+              add: string[],
+              exec: DevExec,
+            ) => Promise<void>;
+          };
+          await gh.swapLabel(devAgentRepo, issueNumber, labels, [], gh.runExec);
+        }
+      : undefined;
+    startDashboard(bot.api, stripIssueLabels ? { stripIssueLabels } : undefined);
 
     // War Room voice server (auto-start if enabled, with auto-respawn)
     if (WARROOM_ENABLED) {
@@ -548,6 +615,147 @@ async function main(): Promise<void> {
     }
   } else {
     logger.warn('ALLOWED_CHAT_ID not set — scheduler disabled (no destination for results)');
+  }
+
+  // ── Dev-agent queue cron (Task 5.13) ──────────────────────────────
+  //
+  // Main-process only (it drives the /dev dashboard and parent-owned PRs)
+  // and gated on a Telegram destination, exactly like the comms cron. The
+  // subsystem is otherwise dormant: with no agent:queue issues every tick
+  // is idle. Three consecutive failures pause it for the rest of this
+  // process lifetime and send one Telegram alert. Skipped entirely (logged
+  // once) without ANTHROPIC_API_KEY or the required env-sourced config, so
+  // nothing is hardcoded in committed source.
+  if (AGENT_ID === 'main' && ALLOWED_CHAT_ID) {
+    const { readEnvFile } = await import('./env.js');
+    const devEnv = readEnvFile([
+      'ANTHROPIC_API_KEY',
+      'DEV_AGENT_REPO',
+      'DEV_AGENT_IOS_REPO_DIR',
+      'DEV_AGENT_WORKTREE_ROOT',
+      'DEV_AGENT_SCHEME',
+      'DEV_AGENT_SIM_DESTINATION',
+    ]);
+
+    // Startup recovery: reset any dev_tasks row crashed mid-work back to its
+    // checkpoint (pure DB op, safe every boot). resetStuckDevTasks is imported
+    // directly from src/db.ts; a skill source file cannot re-export it.
+    const recovered = resetStuckDevTasks();
+    if (recovered > 0) {
+      logger.info({ recovered }, 'Dev-agent: reset stuck dev_tasks on startup');
+    }
+
+    const repo = (devEnv.DEV_AGENT_REPO || '').trim();
+    const iosRepoDir = (devEnv.DEV_AGENT_IOS_REPO_DIR || '').trim();
+    const worktreeRoot = (devEnv.DEV_AGENT_WORKTREE_ROOT || '').trim();
+    const scheme = (devEnv.DEV_AGENT_SCHEME || 'PatientScribe').trim();
+    const simDestination = (devEnv.DEV_AGENT_SIM_DESTINATION || '').trim();
+
+    if (!devEnv.ANTHROPIC_API_KEY) {
+      logger.warn('Dev-agent queue cron disabled: ANTHROPIC_API_KEY not set in .env');
+    } else if (!repo || !iosRepoDir || !worktreeRoot || !simDestination) {
+      logger.warn(
+        {
+          repo: !!repo,
+          iosRepoDir: !!iosRepoDir,
+          worktreeRoot: !!worktreeRoot,
+          simDestination: !!simDestination,
+        },
+        'Dev-agent queue cron disabled: set DEV_AGENT_REPO, DEV_AGENT_IOS_REPO_DIR, DEV_AGENT_WORKTREE_ROOT, and DEV_AGENT_SIM_DESTINATION in .env',
+      );
+    } else {
+      const devConfig = { repo, iosRepoDir, worktreeRoot, scheme, simDestination };
+
+      // The dev skill is a separate compile tree (skills/*.js); reach it at
+      // runtime via dynamic import (the comms-cron pattern) with a restated
+      // type. runExec is the skill's gh-boundary Exec implementation.
+      const devSkillPath = '../skills/dev-agent/index.js';
+      const devSkill = (await import(devSkillPath)) as {
+        processDevQueue: (args: {
+          db: DevProcessorDb;
+          config: typeof devConfig;
+          runAgent: typeof runAgent;
+          exec: DevExec;
+          notify: (message: string) => Promise<void> | void;
+        }) => Promise<{ processed: number; queued: number; failed: number; errors: string[] }>;
+      };
+      const ghPath = '../skills/dev-agent/gh.js';
+      const ghMod = (await import(ghPath)) as { runExec: DevExec };
+      const { processDevQueue } = devSkill;
+      const exec = ghMod.runExec;
+
+      // Injected dev_tasks helper bundle (the src/db.ts singleton). The skill
+      // cannot import src/db, so the wiring lives here.
+      const devDb: DevProcessorDb = {
+        getDevTaskByIssue,
+        createDevTask,
+        claimNextDevTask,
+        completeDevTask,
+        setDevTaskWorktree,
+        getTerminalDevTasksWithWorktree,
+        clearDevTaskWorktree,
+        setDevTaskSpecDrafted,
+        setDevTaskStage,
+        incrementDevTaskReviewRounds,
+        addDevTaskCost,
+      };
+
+      const dashboardUrl = (process.env.DASHBOARD_URL || '').trim();
+      const notify = async (message: string): Promise<void> => {
+        const link = dashboardUrl ? `${dashboardUrl.replace(/\/$/, '')}/dev` : '/dev';
+        await bot.api
+          .sendMessage(ALLOWED_CHAT_ID, `${message}\n${link}`)
+          .catch((err: unknown) => logger.error({ err }, 'Dev-agent notify failed'));
+      };
+
+      let devConsecutiveFailures = 0;
+      let devPaused = false;
+      const DEV_FAILURE_THRESHOLD = 3;
+      const DEV_INTERVAL_MS = 2 * 60 * 1000;
+      // Longer initial delay than comms (30s) so the first tick never races
+      // the rest of startup.
+      const DEV_INITIAL_DELAY_MS = 90 * 1000;
+
+      const runDevTick = async (): Promise<void> => {
+        if (devPaused) return;
+        try {
+          const result = await processDevQueue({ db: devDb, config: devConfig, runAgent, exec, notify });
+          if (result.failed > 0) {
+            devConsecutiveFailures++;
+            logger.warn(
+              { ...result, consecutiveFailures: devConsecutiveFailures },
+              'Dev-agent tick completed with failures',
+            );
+          } else {
+            if (result.processed > 0 || result.queued > 0) {
+              logger.info(
+                { processed: result.processed, queued: result.queued },
+                'Dev-agent tick',
+              );
+            } else {
+              logger.debug('Dev-agent tick idle (no agent:queue issues)');
+            }
+            devConsecutiveFailures = 0;
+          }
+        } catch (err) {
+          devConsecutiveFailures++;
+          logger.error({ err, consecutiveFailures: devConsecutiveFailures }, 'Dev-agent tick threw');
+        }
+        if (devConsecutiveFailures >= DEV_FAILURE_THRESHOLD && !devPaused) {
+          devPaused = true;
+          await bot.api
+            .sendMessage(
+              ALLOWED_CHAT_ID,
+              `Dev-agent queue cron failed ${DEV_FAILURE_THRESHOLD} times in a row. Processing paused until the bot is restarted. Check /tmp/claudeclaw.err for details.`,
+            )
+            .catch((err: unknown) => logger.error({ err }, 'Failed to send dev-agent pause alert'));
+        }
+      };
+
+      setTimeout(() => void runDevTick(), DEV_INITIAL_DELAY_MS);
+      setInterval(() => void runDevTick(), DEV_INTERVAL_MS);
+      logger.info('Dev-agent queue cron enabled (every 2 min)');
+    }
   }
 
   const shutdown = async () => {
