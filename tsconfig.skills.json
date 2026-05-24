@@ -7,6 +7,6 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "include": ["skills/appstoreconnect/index.ts", "skills/appstoreconnect/schema.ts", "skills/appstoreconnect/jwt.ts", "skills/appstoreconnect/client.ts", "skills/appstoreconnect/poller.ts", "skills/github-issues/labels.ts", "skills/github-issues/promote.ts", "skills/github-issues/index.ts", "skills/comms-agent/index.ts", "skills/comms-agent/phi-redact.ts", "skills/comms-agent/process.ts", "skills/comms-agent/runtime.ts", "skills/dev-agent/gh.ts", "skills/dev-agent/worktree.ts", "skills/dev-agent/build-verify.ts", "skills/dev-agent/secret-redact.ts", "skills/dev-agent/scrub.ts", "skills/dev-agent/pr.ts", "skills/dev-agent/failure.ts", "skills/dev-agent/watch-queue.ts"],
+  "include": ["skills/appstoreconnect/index.ts", "skills/appstoreconnect/schema.ts", "skills/appstoreconnect/jwt.ts", "skills/appstoreconnect/client.ts", "skills/appstoreconnect/poller.ts", "skills/github-issues/labels.ts", "skills/github-issues/promote.ts", "skills/github-issues/index.ts", "skills/comms-agent/index.ts", "skills/comms-agent/phi-redact.ts", "skills/comms-agent/process.ts", "skills/comms-agent/runtime.ts", "skills/dev-agent/gh.ts", "skills/dev-agent/worktree.ts", "skills/dev-agent/build-verify.ts", "skills/dev-agent/secret-redact.ts", "skills/dev-agent/scrub.ts", "skills/dev-agent/pr.ts", "skills/dev-agent/failure.ts", "skills/dev-agent/watch-queue.ts", "skills/dev-agent/workflow.ts"],
   "exclude": ["node_modules", "dist", "**/tests/**", "**/*.test.ts"]
 }
