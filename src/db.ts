@@ -350,7 +350,7 @@ function createSchema(database: Database.Database): void {
     -- would benefit from being split. Each suggestion lives until the
     -- user dismisses it (sets dismissed_at) or acts on it. We keep
     -- dismissed rows so re-running analysis doesn't keep re-suggesting
-    -- the same split — the analyzer skips parents+IDs that already
+    -- the same split, the analyzer skips parents+IDs that already
     -- have a non-superseded suggestion.
     CREATE TABLE IF NOT EXISTS agent_suggestions (
       id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1499,7 +1499,7 @@ function decodeRedactedTerms(raw: string | null): string[] | null {
  * Defensively decode `asc_feedback.screenshots_json` into a typed array.
  * Returns [] for null, malformed JSON, non-array shapes, or entries that
  * don't match the Apple CDN payload shape. Same fail-soft pattern as
- * `decodeRedactedTerms` — the dashboard should never blow up because the
+ * `decodeRedactedTerms`, the dashboard should never blow up because the
  * column has an unexpected shape.
  */
 function decodeScreenshots(raw: string | null): AscScreenshot[] {
@@ -1553,7 +1553,7 @@ export function applyAscFeedbackSchemaIfMissing(): void {
 
   // Phase 4 (Task 4.6): the asc_drafts table is referenced by the dashboard
   // lane's LEFT JOIN. If it's missing the route's outer try/catch swallows
-  // the SQL error and the lane shows blank — apply at startup too. The SQL
+  // the SQL error and the lane shows blank, apply at startup too. The SQL
   // is self-idempotent (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT
   // EXISTS) so this is safe to run on every boot.
   const draftsSqlPath = path.join(PROJECT_ROOT, 'store', 'migrations', '2026-05-08-asc-drafts.sql');
@@ -2651,7 +2651,7 @@ export function createDevTask(id: string, issueNumber: number, issueTitle: strin
   ).run(id, issueNumber, issueTitle, nowSec());
 }
 
-/** Any-status lookup by issue number — the watcher's global-UNIQUE dedup. */
+/** Any-status lookup by issue number, the watcher's global-UNIQUE dedup. */
 export function getDevTaskByIssue(issueNumber: number): DevTask | null {
   return (
     (db.prepare('SELECT * FROM dev_tasks WHERE issue_number = ?').get(issueNumber) as DevTask) ??
@@ -2769,7 +2769,7 @@ export function setDevTaskWorktree(id: string, worktreePath: string, branch: str
   );
 }
 
-/** Terminal rows that still hold a worktree — the per-tick sweep targets. */
+/** Terminal rows that still hold a worktree, the per-tick sweep targets. */
 export function getTerminalDevTasksWithWorktree(): DevTask[] {
   return db
     .prepare(
@@ -3131,7 +3131,7 @@ export function addWarRoomTranscript(
 }
 
 // Voice-only history. Text meetings live in the same table (with
-// meeting_type = 'text') and have their own /warroom/text picker — they
+// meeting_type = 'text') and have their own /warroom/text picker, they
 // must not leak into the voice meeting list.
 export function getWarRoomMeetings(limit = 20): Array<{
   id: string; started_at: number; ended_at: number | null; duration_s: number | null;
@@ -3367,7 +3367,7 @@ export function clearMeetingSessions(meetingId: string, agentIds: string[]): num
 // ── Client message dedup (in-memory LRU) ─────────────────────────────
 // Sized for 10k concurrent conversations with rapid resends. 24h TTL means
 // a user that retries a message a day later gets re-processed (acceptable).
-// Not persisted across bot restarts — worst case a retry after restart
+// Not persisted across bot restarts, worst case a retry after restart
 // double-processes; acceptable tradeoff vs a DB table for something this
 // ephemeral.
 
@@ -3402,7 +3402,7 @@ export function rememberClientMsgId(id: string, ttlMs = CLIENT_MSG_TTL_MS): bool
   return true;
 }
 
-/** @internal for tests — clear the dedup cache. */
+/** @internal for tests, clear the dedup cache. */
 export function _resetClientMsgCache(): void {
   _clientMsgSeen.clear();
 }

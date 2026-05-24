@@ -1,7 +1,7 @@
 // skills/dev-agent/worktree.ts
 //
 // Per-issue git worktree manager. Each task works in its own worktree rooted
-// at <worktreeRoot>/issue-<N> — a sibling fully OUTSIDE the Xcode-synced
+// at <worktreeRoot>/issue-<N>, a sibling fully OUTSIDE the Xcode-synced
 // PatientScribe/PatientScribe/ tree (respects the 2026-04-15 "Multiple
 // commands produce" incident). createWorktree always tears down any prior
 // worktree first, so a crash-recovered task is rebuilt from a clean

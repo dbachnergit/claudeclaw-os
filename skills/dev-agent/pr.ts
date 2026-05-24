@@ -1,7 +1,7 @@
 // skills/dev-agent/pr.ts
 //
 // Parent-owned, idempotent draft-PR opener. The LLM subprocess never reaches
-// here — it only makes local commits. The push (asserted never main), the
+// here, it only makes local commits. The push (asserted never main), the
 // gh pr create (hardcoded --draft --base main), and the terminal label
 // cleanup are all non-LLM code, so the never-merge/never-push-main guarantee
 // holds at the process boundary. Agent-authored spec text is run through the
@@ -33,7 +33,7 @@ function buildBody(issue: number, specMd: string, testEvidence?: string): string
     '## Approved spec',
     spec,
     '',
-    '## Test evidence (agent-supplied, best-effort — not parent-verified)',
+    '## Test evidence (agent-supplied, best-effort, not parent-verified)',
     evidence,
     '',
     '---',

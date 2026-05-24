@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { giveUp } from '../failure.js';
 import type { Exec } from '../gh.js';
 
-const REPO = 'dbachnergit/PatientScribe';
+const REPO = 'owner/repo';
 
 function okExec(): Exec & ReturnType<typeof vi.fn> {
   return vi.fn(async () => ({ stdout: '', stderr: '', code: 0 })) as unknown as Exec &

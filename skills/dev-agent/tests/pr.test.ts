@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { openPr } from '../pr.js';
 import type { Exec } from '../gh.js';
 
-const REPO = 'dbachnergit/PatientScribe';
+const REPO = 'owner/repo';
 const REPODIR = '/Users/x/Projects/PatientScribe';
 
 /** Smart stub: scripts gh pr list / pr create; defaults git ops to success. */
@@ -41,9 +41,9 @@ const createArgs = (exec: ReturnType<typeof vi.fn>) =>
 
 describe('openPr', () => {
   it('opens a DRAFT PR against main from the agent branch and returns the trimmed URL', async () => {
-    const exec = makeExec({ createUrl: 'https://github.com/dbachnergit/PatientScribe/pull/55' });
+    const exec = makeExec({ createUrl: 'https://github.com/owner/repo/pull/55' });
     const url = await openPr({ repo: REPO, repoDir: REPODIR, issue: 42, branch: 'agent/issue-42', specMd: 'Fix it', exec });
-    expect(url).toBe('https://github.com/dbachnergit/PatientScribe/pull/55');
+    expect(url).toBe('https://github.com/owner/repo/pull/55');
     const args = createArgs(exec)!;
     expect(args).toContain('--draft');
     expect(args.slice(args.indexOf('--base'), args.indexOf('--base') + 2)).toEqual(['--base', 'main']);

@@ -16,11 +16,11 @@ export interface GiveUpArgs {
   issue: number;
   /** Parent-controlled give-up cause (budget / two-strike build / review cap). */
   reason: string;
-  /** Agent-authored diagnosis — SCRUBBED before posting. */
+  /** Agent-authored diagnosis, SCRUBBED before posting. */
   diagnosis: string;
   exec: Exec;
   notify: (message: string) => Promise<void> | void;
-  /** Agent-authored "what was tried" — SCRUBBED before posting. */
+  /** Agent-authored "what was tried", SCRUBBED before posting. */
   attempted?: string;
   /** The stage it stuck at (e.g. adversarial_review). */
   stuckAt?: string;

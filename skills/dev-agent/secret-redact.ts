@@ -3,7 +3,7 @@
 // VENDORED, VERBATIM, from src/exfiltration-guard.ts (scanForSecrets /
 // redactSecrets / PATTERNS). Skills compile in place (tsconfig.skills.json,
 // rootDir ./skills) and load as skills/<name>/*.js at runtime, while src
-// compiles to dist/ — so a skill CANNOT import ../../src/* (it breaks both
+// compiles to dist/, so a skill CANNOT import ../../src/* (it breaks both
 // tsc rootDir and the runtime path). This mirrors how comms-agent vendors its
 // own phi-redact.ts inside the skills tree. KEEP IN SYNC with
 // src/exfiltration-guard.ts; if that file's patterns change, update here too.

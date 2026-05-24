@@ -9,7 +9,7 @@ import {
 } from '../../../src/db.js';
 import type { Exec } from '../gh.js';
 
-const REPO = 'dbachnergit/PatientScribe';
+const REPO = 'owner/repo';
 
 // The watcher receives its db helpers by injection; tests wire the REAL
 // singleton-backed helpers (high-fidelity) against the in-memory db.

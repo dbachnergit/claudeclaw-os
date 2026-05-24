@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { _initTestDatabase, _testGetDb } from '../../../src/db.js';
 
 /**
- * Task 5.1 — dev_tasks table is the single schema source in src/db.ts's
+ * Task 5.1, dev_tasks table is the single schema source in src/db.ts's
  * startup CREATE TABLE block. These tests issue raw SQL against the
  * in-memory db (same init path as production) to prove the column set and
  * the integrity constraints, before the typed helpers (Task 5.8) exist.

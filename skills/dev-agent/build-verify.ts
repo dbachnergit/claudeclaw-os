@@ -76,7 +76,7 @@ export function evaluate({
   if (newWarnings.length > 0) reasons.push(`new warnings (${newWarnings.length})`);
 
   const testsPassed = testCode === 0;
-  // Only blame tests once the build actually compiled — otherwise the compile
+  // Only blame tests once the build actually compiled, otherwise the compile
   // failure is the real (and only) cause.
   if (compiled && !testsPassed) reasons.push('tests failed');
 

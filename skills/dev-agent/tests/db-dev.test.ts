@@ -23,7 +23,7 @@ import {
 } from '../../../src/db.js';
 
 /**
- * Task 5.8 — typed dev_tasks CRUD, the claimable-state claim, the CAS
+ * Task 5.8, typed dev_tasks CRUD, the claimable-state claim, the CAS
  * human-gate transitions, the terminal-worktree sweep helpers, and the
  * active-only startup recovery. All operate on the module-level db
  * singleton via _initTestDatabase (same path as the mission helpers).
