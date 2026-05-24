@@ -234,6 +234,35 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_mission_status
       ON mission_tasks(assigned_agent, status, priority DESC, created_at ASC);
 
+    -- AI OS Phase 5: autonomous dev-agent lifecycle. Single schema source
+    -- (no migration file, no skill-applied schema). One row per nominated
+    -- iOS bug. The claimable states are queued ∪ spec_approved; spec_drafted
+    -- is the idle human-approval pause; pr_open/stuck/rejected/cancelled are
+    -- terminal. The stage column is a display-only sub-state while running.
+    CREATE TABLE IF NOT EXISTS dev_tasks (
+      id               TEXT PRIMARY KEY,
+      issue_number     INTEGER NOT NULL UNIQUE,
+      issue_title      TEXT NOT NULL,
+      status           TEXT NOT NULL DEFAULT 'queued'
+                         CHECK (status IN ('queued','running','spec_drafted','spec_approved','pr_open','stuck','rejected','cancelled')),
+      stage            TEXT,
+      stage_checkpoint TEXT NOT NULL DEFAULT 'queued'
+                         CHECK (stage_checkpoint IN ('queued','spec_approved')),
+      review_notes     TEXT,
+      spec_md          TEXT,
+      worktree_path    TEXT,
+      branch           TEXT,
+      pr_url           TEXT,
+      review_rounds    INTEGER NOT NULL DEFAULT 0,
+      cost_usd         REAL NOT NULL DEFAULT 0,
+      error            TEXT,
+      created_at       INTEGER NOT NULL,
+      started_at       INTEGER,
+      completed_at     INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_dev_tasks_status
+      ON dev_tasks(status, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS meet_sessions (
       id              TEXT PRIMARY KEY,         -- session id from the provider's join response
       agent_id        TEXT NOT NULL,            -- which agent is in the meeting
@@ -743,6 +772,15 @@ export function _initTestDatabase(): void {
   db.pragma('journal_mode = WAL');
   createSchema(db);
   runMigrations(db);
+}
+
+/**
+ * Test-only: raw handle to the active database, so schema/constraint tests
+ * can issue direct SQL before the typed helpers exist. Marked with the
+ * `_test` prefix consistent with other test-only exports.
+ */
+export function _testGetDb(): Database.Database {
+  return db;
 }
 
 /**
