@@ -105,7 +105,13 @@ import {
   clearMeetingSessions,
   getOpenTextMeetingIds,
   getTextMeetings,
+  listDevTasks,
+  getDevTaskById,
+  approveDevTask,
+  requestChangesDevTask,
+  rejectDevTask,
 } from './db.js';
+import { getDevDashboardHtml } from './dev-dashboard-html.js';
 import { messageQueue } from './message-queue.js';
 import * as killSwitches from './kill-switches.js';
 import { getIngestionQuotaStatus, extractViaClaude } from './memory-ingest.js';
@@ -223,12 +229,28 @@ const WARROOM_TEXT_ID_RE = /^wr_[a-z0-9_]{4,64}$/i;
 const CLIENT_MSG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
+ * Injected dev-agent capabilities the dashboard cannot satisfy itself.
+ *
+ * The dashboard lives in `src/` (rootDir `./src`) and so cannot import the
+ * dev-agent skill's `gh.ts`. The reject handler still owns the label-POLICY
+ * decision (which labels to strip), but the gh MECHANISM + repo slug are
+ * injected at wiring time (`src/index.ts`, Task 5.13). Left undefined (the
+ * contract-test default and any non-dev deployment), the reject route still
+ * performs its DB compare-and-swap; the stray label is then self-healed by
+ * the watcher's terminal-row sweep on a later tick.
+ */
+export interface DevDashboardDeps {
+  /** Strip the given GitHub labels from a rejected task's issue. */
+  stripIssueLabels?: (issueNumber: number, labels: string[]) => Promise<void>;
+}
+
+/**
  * Build the dashboard Hono app without binding it to a port. Exported for
  * contract tests so the route surface can be exercised via `app.request()`
  * without standing up a real server. Production callers should use
  * `startDashboard` instead, which builds the app then serves it.
  */
-export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
+export function buildDashboardApp(botApi?: Api<RawApi>, devDeps?: DevDashboardDeps): Hono {
   const app = new Hono();
 
   // CORS headers for cross-origin access (Cloudflare tunnel, mobile browsers)
@@ -3285,6 +3307,67 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
     return c.json({ ok: aborted });
   });
 
+  // ── Dev-agent dashboard (Task 5.12) ──────────────────────────────
+  //
+  // GET /dev is a data-free SPA shell served unauthenticated (it passes
+  // through the auth middleware, which gates only /api/*). It reads
+  // ?token= at runtime and fetches the token-gated /api/dev/* surface.
+  // The three POSTs are compare-and-swap human gates: each underlying
+  // helper returns a changed-row count, and a 0 (stale tab / double
+  // click / interleaved transition) yields 409 with NO side effects.
+  app.get('/dev', (c) => c.html(getDevDashboardHtml()));
+
+  app.get('/api/dev/tasks', (c) => {
+    return c.json({ tasks: listDevTasks({ excludeCancelled: true }) });
+  });
+
+  app.post('/api/dev/tasks/:id/approve', (c) => {
+    const changed = approveDevTask(c.req.param('id'));
+    if (changed === 0) return c.json({ error: 'conflict' }, 409);
+    return c.json({ ok: true, status: 'spec_approved' });
+  });
+
+  app.post('/api/dev/tasks/:id/request-changes', async (c) => {
+    const id = c.req.param('id');
+    const body: { notes?: unknown } = await c.req.json().catch(() => ({}));
+    const raw = body.notes;
+    if (typeof raw !== 'string') return c.json({ error: 'notes required' }, 400);
+    // Strip C0/C1 control chars (keep tab, newline, CR for multi-line notes)
+    // before the value is later injected into a re-diagnosis LLM prompt.
+    const notes = raw.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+    if (notes.trim() === '') return c.json({ error: 'notes required' }, 400);
+    if (Buffer.byteLength(notes, 'utf8') > 4096) {
+      return c.json({ error: 'notes too long (max 4096 bytes)' }, 400);
+    }
+    const changed = requestChangesDevTask(id, notes);
+    if (changed === 0) return c.json({ error: 'conflict' }, 409);
+    return c.json({ ok: true, status: 'queued' });
+  });
+
+  app.post('/api/dev/tasks/:id/reject', async (c) => {
+    const id = c.req.param('id');
+    const changed = rejectDevTask(id);
+    if (changed === 0) return c.json({ error: 'conflict' }, 409);
+    // Terminal cleanup: strip the dev-agent labels (human decline, NOT a
+    // give-up, so NO agent:stuck). The :id route param carries no issue
+    // number, so resolve it from the row. No git/FS work here; the
+    // diagnosis-stage worktree is reclaimed by the next dev-tick terminal
+    // sweep. The label strip is best-effort: on failure the watcher's
+    // terminal-row self-heal strips the stray label on a later tick.
+    const task = getDevTaskById(id);
+    if (task && devDeps?.stripIssueLabels) {
+      try {
+        await devDeps.stripIssueLabels(task.issue_number, ['agent:queue', 'status:in-flight']);
+      } catch (err: any) {
+        logger.warn(
+          { err: err?.message, issue: task.issue_number },
+          'dev reject: label strip failed (watcher will self-heal)',
+        );
+      }
+    }
+    return c.json({ ok: true, status: 'rejected' });
+  });
+
   // SPA catch-all — any unmatched GET to a non-/api/* path falls through
   // to here and serves the v2 SPA index.html. Wouter (the SPA's router)
   // then takes over client-side. This is what makes a hard-refresh of
@@ -3311,13 +3394,13 @@ export function buildDashboardApp(botApi?: Api<RawApi>): Hono {
  * Start the dashboard: build the Hono app, bind it to DASHBOARD_PORT, and
  * wire up the WebSocket proxy for the voice War Room.
  */
-export function startDashboard(botApi?: Api<RawApi>): void {
+export function startDashboard(botApi?: Api<RawApi>, devDeps?: DevDashboardDeps): void {
   if (!DASHBOARD_TOKEN) {
     logger.info('DASHBOARD_TOKEN not set, dashboard disabled');
     return;
   }
 
-  const app = buildDashboardApp(botApi);
+  const app = buildDashboardApp(botApi, devDeps);
 
   // Default to loopback. Anyone on the same LAN is otherwise one
   // dashboard-token leak away from full mutation access. Operators who

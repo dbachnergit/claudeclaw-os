@@ -14,7 +14,13 @@
 // land BEFORE config.ts evaluates at import time.
 
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
-import { _initTestDatabase } from './db.js';
+import {
+  _initTestDatabase,
+  createDevTask,
+  claimNextDevTask,
+  setDevTaskSpecDrafted,
+  getDevTaskById,
+} from './db.js';
 import { buildDashboardApp } from './dashboard.js';
 import type { Hono } from 'hono';
 
@@ -603,5 +609,230 @@ describe('Security headers on /', () => {
   it('X-Content-Type-Options: nosniff is set', async () => {
     const res = await get('/api/health');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+});
+
+// ── Dev-agent dashboard (Task 5.12) ──────────────────────────────────
+//
+// The spec-approval surface. GET /dev is a data-free SPA shell served
+// unauthenticated like `/` (it reads ?token= and fetches the gated API
+// at runtime); never inline spec/task data. The /api/dev/* surface is
+// token-gated by the global middleware. The three human-gate POSTs are
+// compare-and-swap: a no-op (stale tab / double click / interleaved
+// transition) returns 409 with NO side effects (no label ops). Reject is
+// a human decline that strips agent:queue + status:in-flight (and does
+// NOT add agent:stuck); the gh mechanism is injected so the dashboard,
+// which cannot import the skill's gh.ts, stays the label-policy owner.
+describe('dev dashboard API (Task 5.12)', () => {
+  let devApp: Hono;
+  // Records every injected label-strip so the contract test can assert the
+  // EXACT label operations (and that none happen on a 409 / non-reject).
+  let stripped: Array<{ issueNumber: number; labels: string[] }>;
+
+  beforeEach(() => {
+    stripped = [];
+    devApp = buildDashboardApp(undefined, {
+      stripIssueLabels: async (issueNumber: number, labels: string[]) => {
+        stripped.push({ issueNumber, labels });
+      },
+    }) as unknown as Hono;
+  });
+
+  function seedSpecDrafted(
+    issueNumber: number,
+    opts?: { title?: string; spec?: string },
+  ): string {
+    const id = `dev-${issueNumber}`;
+    createDevTask(id, issueNumber, opts?.title ?? `Bug #${issueNumber}`);
+    claimNextDevTask(); // queued → running (diagnosing)
+    setDevTaskSpecDrafted(id, opts?.spec ?? '# Spec\nApply a guard clause.');
+    return id;
+  }
+
+  async function devGet(path: string, withToken = true) {
+    const url = withToken
+      ? path + (path.includes('?') ? '&' : '?') + 'token=' + TOKEN
+      : path;
+    return devApp.request(url);
+  }
+
+  async function devPost(path: string, body?: unknown, withToken = true) {
+    const url = withToken
+      ? path + (path.includes('?') ? '&' : '?') + 'token=' + TOKEN
+      : path;
+    return devApp.request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  }
+
+  describe('GET /api/dev/tasks', () => {
+    it('rejects unauthenticated requests with 401', async () => {
+      const res = await devGet('/api/dev/tasks', false);
+      expect(res.status).toBe(401);
+    });
+
+    it('returns the task list with the token', async () => {
+      seedSpecDrafted(101);
+      const res = await devGet('/api/dev/tasks');
+      expect(res.status).toBe(200);
+      const body = await jsonOf(res);
+      expect(Array.isArray(body.tasks)).toBe(true);
+      expect(body.tasks).toHaveLength(1);
+      expect(body.tasks[0]).toMatchObject({ issue_number: 101, status: 'spec_drafted' });
+    });
+
+    it('excludes cancelled tasks', async () => {
+      // A cancelled (off-switch) row must not surface in the dashboard list.
+      createDevTask('dev-200', 200, 'Pulled bug');
+      // Move it to a terminal cancelled state via the public helper path:
+      // claim then complete as cancelled.
+      claimNextDevTask();
+      const { completeDevTask } = await import('./db.js');
+      completeDevTask('dev-200', 'cancelled');
+      seedSpecDrafted(201);
+      const res = await devGet('/api/dev/tasks');
+      const body = await jsonOf(res);
+      expect(body.tasks).toHaveLength(1);
+      expect(body.tasks[0].issue_number).toBe(201);
+    });
+  });
+
+  describe('GET /dev shell', () => {
+    it('serves an HTML shell without a token (like /)', async () => {
+      const res = await devGet('/dev', false);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+    });
+
+    it('never inlines task or spec data into the shell', async () => {
+      const marker = 'UNIQUE-SPEC-MARKER-deadbeef';
+      seedSpecDrafted(303, { title: 'UNIQUE-TITLE-cafe', spec: `# Spec\n${marker}` });
+      const res = await devGet('/dev', false);
+      const html = await res.text();
+      expect(html).not.toContain(marker);
+      expect(html).not.toContain('UNIQUE-TITLE-cafe');
+      // The shell must not embed the dashboard token either.
+      expect(html).not.toContain(TOKEN);
+    });
+  });
+
+  describe('POST /api/dev/tasks/:id/approve', () => {
+    it('approves a spec_drafted task → spec_approved', async () => {
+      const id = seedSpecDrafted(110);
+      const res = await devPost(`/api/dev/tasks/${id}/approve`, {});
+      expect(res.status).toBe(200);
+      expect(await jsonOf(res)).toMatchObject({ ok: true, status: 'spec_approved' });
+      expect(getDevTaskById(id)?.status).toBe('spec_approved');
+    });
+
+    it('returns 409 on a second approve, leaving state intact and no label ops', async () => {
+      const id = seedSpecDrafted(111);
+      await devPost(`/api/dev/tasks/${id}/approve`, {});
+      const res = await devPost(`/api/dev/tasks/${id}/approve`, {});
+      expect(res.status).toBe(409);
+      expect(getDevTaskById(id)?.status).toBe('spec_approved');
+      expect(stripped).toHaveLength(0);
+    });
+
+    it('requires the token', async () => {
+      const id = seedSpecDrafted(112);
+      const res = await devPost(`/api/dev/tasks/${id}/approve`, {}, false);
+      expect(res.status).toBe(401);
+    });
+  });
+
+  describe('POST /api/dev/tasks/:id/request-changes', () => {
+    it('returns the task to queued and persists the notes', async () => {
+      const id = seedSpecDrafted(120);
+      const res = await devPost(`/api/dev/tasks/${id}/request-changes`, {
+        notes: 'Prefer a guard clause over the nested if.',
+      });
+      expect(res.status).toBe(200);
+      expect(await jsonOf(res)).toMatchObject({ ok: true, status: 'queued' });
+      const row = getDevTaskById(id);
+      expect(row?.status).toBe('queued');
+      expect(row?.review_notes).toBe('Prefer a guard clause over the nested if.');
+    });
+
+    it('rejects empty notes with 400 and does not transition', async () => {
+      const id = seedSpecDrafted(121);
+      const res = await devPost(`/api/dev/tasks/${id}/request-changes`, { notes: '   ' });
+      expect(res.status).toBe(400);
+      expect(getDevTaskById(id)?.status).toBe('spec_drafted');
+    });
+
+    it('rejects missing notes with 400', async () => {
+      const id = seedSpecDrafted(122);
+      const res = await devPost(`/api/dev/tasks/${id}/request-changes`, {});
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects oversized notes (> 4096 bytes) with 400', async () => {
+      const id = seedSpecDrafted(123);
+      const res = await devPost(`/api/dev/tasks/${id}/request-changes`, {
+        notes: 'x'.repeat(4097),
+      });
+      expect(res.status).toBe(400);
+      expect(getDevTaskById(id)?.status).toBe('spec_drafted');
+    });
+
+    it('strips control chars from notes before persisting', async () => {
+      const id = seedSpecDrafted(124);
+      const res = await devPost(`/api/dev/tasks/${id}/request-changes`, {
+        notes: 'fix\x00 the\x07 bug',
+      });
+      expect(res.status).toBe(200);
+      expect(getDevTaskById(id)?.review_notes).toBe('fix the bug');
+    });
+
+    it('returns 409 when the task is no longer spec_drafted', async () => {
+      const id = seedSpecDrafted(125);
+      await devPost(`/api/dev/tasks/${id}/approve`, {}); // → spec_approved
+      const res = await devPost(`/api/dev/tasks/${id}/request-changes`, { notes: 'too late' });
+      expect(res.status).toBe(409);
+      expect(getDevTaskById(id)?.status).toBe('spec_approved');
+    });
+  });
+
+  describe('POST /api/dev/tasks/:id/reject', () => {
+    it('rejects a spec_drafted task and strips exactly agent:queue + status:in-flight', async () => {
+      const id = seedSpecDrafted(130);
+      const res = await devPost(`/api/dev/tasks/${id}/reject`, {});
+      expect(res.status).toBe(200);
+      expect(await jsonOf(res)).toMatchObject({ ok: true, status: 'rejected' });
+      expect(getDevTaskById(id)?.status).toBe('rejected');
+      expect(stripped).toHaveLength(1);
+      expect(stripped[0].issueNumber).toBe(130);
+      expect(stripped[0].labels).toEqual(['agent:queue', 'status:in-flight']);
+      expect(stripped[0].labels).not.toContain('agent:stuck');
+    });
+
+    it('returns 409 on a second reject with NO label side effects', async () => {
+      const id = seedSpecDrafted(131);
+      await devPost(`/api/dev/tasks/${id}/reject`, {});
+      stripped = []; // ignore the first (legitimate) strip
+      const res = await devPost(`/api/dev/tasks/${id}/reject`, {});
+      expect(res.status).toBe(409);
+      expect(getDevTaskById(id)?.status).toBe('rejected');
+      expect(stripped).toHaveLength(0);
+    });
+
+    it('returns 409 when rejecting after request-changes (no longer spec_drafted) with no label ops', async () => {
+      const id = seedSpecDrafted(132);
+      await devPost(`/api/dev/tasks/${id}/request-changes`, { notes: 'redo it' }); // → queued
+      const res = await devPost(`/api/dev/tasks/${id}/reject`, {});
+      expect(res.status).toBe(409);
+      expect(getDevTaskById(id)?.status).toBe('queued');
+      expect(stripped).toHaveLength(0);
+    });
+
+    it('requires the token', async () => {
+      const id = seedSpecDrafted(133);
+      const res = await devPost(`/api/dev/tasks/${id}/reject`, {}, false);
+      expect(res.status).toBe(401);
+      expect(stripped).toHaveLength(0);
+    });
   });
 });
