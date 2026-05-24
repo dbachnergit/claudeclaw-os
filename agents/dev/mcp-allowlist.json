@@ -1,0 +1,10 @@
+{
+  "_comment": "MCP policy for the dev agent. servers feeds loadMcpServers (server-level filtering, all it can do). allowedTools feeds the PreToolUse hook as mcpToolAllowlist, which denies any other mcp__* tool (screenshot, debug_*, device, UI) even though the whole server is loaded, since server-name filtering alone cannot drop individual tools. Only the build/test tools the TDD loop needs are listed; the authoritative build gate stays parent-owned.",
+  "servers": ["XcodeBuildMCP"],
+  "allowedTools": [
+    "mcp__XcodeBuildMCP__build_sim",
+    "mcp__XcodeBuildMCP__test_sim",
+    "mcp__XcodeBuildMCP__list_schemes",
+    "mcp__XcodeBuildMCP__show_build_settings"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "_comment": "SDK native-tool policy for the dev agent, consumed by makeDevRunAgent and passed through the runAgent options seam (NOT by loadAgentConfig). baseTools and disallowedTools map to the SDK tools/disallowedTools options that actually bound the tool set (allowedTools is auto-approve-only and does not restrict). WebFetch and WebSearch are denied so the subprocess has no first-class network egress tool. deniedBashPatterns feed the PreToolUse deny hook (remote-mutating git/gh). deniedReadGlobs feed both the SDK sandbox.filesystem.denyRead and the hook path guard; the per-issue worktree path is the runtime allowedRoots, injected per task, not stored here. network feeds sandbox.network for OS-level egress confinement.",
+  "baseTools": ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "TodoWrite"],
+  "disallowedTools": ["WebFetch", "WebSearch"],
+  "deniedBashPatterns": ["git push", "git remote", "gh pr", "gh issue", "gh repo", "gh api -X", "gh api --method"],
+  "deniedReadGlobs": ["**/.env*", "**/.ssh/**", "**/.aws/**", "**/.config/**", "**/.claude/**"],
+  "network": { "allowManagedDomainsOnly": true, "allowLocalBinding": true }
+}
