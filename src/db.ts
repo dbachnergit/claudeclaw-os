@@ -2592,6 +2592,228 @@ export function resetStuckMissionTasks(agentId: string): number {
   return result.changes;
 }
 
+// ── Dev Tasks (AI OS Phase 5 autonomous dev agent) ──────────────────
+//
+// Typed CRUD over the dev_tasks table (single schema source above). These
+// mirror the mission-task helpers and operate on the module-level db
+// singleton: the dev-agent skill imports them and runs in the main process
+// where initDatabase() has already run. Claimable states are queued ∪
+// spec_approved; the CAS human-gate transitions return a changed-row count so
+// the dashboard API can 409 a no-op (stale tab / double-click).
+
+export type DevTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'spec_drafted'
+  | 'spec_approved'
+  | 'pr_open'
+  | 'stuck'
+  | 'rejected'
+  | 'cancelled';
+export type DevTaskStage =
+  | 'diagnosing'
+  | 'implementing'
+  | 'self_review'
+  | 'adversarial_review'
+  | 'verifying';
+export type DevTaskCheckpoint = 'queued' | 'spec_approved';
+export type DevTaskTerminal = 'pr_open' | 'stuck' | 'rejected' | 'cancelled';
+
+export interface DevTask {
+  id: string;
+  issue_number: number;
+  issue_title: string;
+  status: DevTaskStatus;
+  stage: DevTaskStage | null;
+  stage_checkpoint: DevTaskCheckpoint;
+  review_notes: string | null;
+  spec_md: string | null;
+  worktree_path: string | null;
+  branch: string | null;
+  pr_url: string | null;
+  review_rounds: number;
+  cost_usd: number;
+  error: string | null;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+}
+
+function nowSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+/** Insert a freshly nominated bug as a queued task (checkpoint=queued). */
+export function createDevTask(id: string, issueNumber: number, issueTitle: string): void {
+  db.prepare(
+    `INSERT INTO dev_tasks (id, issue_number, issue_title, status, stage_checkpoint, created_at)
+     VALUES (?, ?, ?, 'queued', 'queued', ?)`,
+  ).run(id, issueNumber, issueTitle, nowSec());
+}
+
+/** Any-status lookup by issue number — the watcher's global-UNIQUE dedup. */
+export function getDevTaskByIssue(issueNumber: number): DevTask | null {
+  return (
+    (db.prepare('SELECT * FROM dev_tasks WHERE issue_number = ?').get(issueNumber) as DevTask) ??
+    null
+  );
+}
+
+export function getDevTaskById(id: string): DevTask | null {
+  return (db.prepare('SELECT * FROM dev_tasks WHERE id = ?').get(id) as DevTask) ?? null;
+}
+
+/** Dashboard listing; optionally hides off-switch-cancelled rows. */
+export function listDevTasks(opts?: { excludeCancelled?: boolean }): DevTask[] {
+  const where = opts?.excludeCancelled ? `WHERE status != 'cancelled'` : '';
+  return db
+    .prepare(`SELECT * FROM dev_tasks ${where} ORDER BY created_at DESC`)
+    .all() as DevTask[];
+}
+
+/**
+ * Transactional single-claim over the claimable states. A queued row enters
+ * the diagnose stage; a spec_approved row (human-approved) enters implement.
+ * Returns null if nothing is claimable (one task at a time).
+ */
+export function claimNextDevTask(): DevTask | null {
+  const txn = db.transaction(() => {
+    const task = db
+      .prepare(
+        `SELECT * FROM dev_tasks
+         WHERE status IN ('queued', 'spec_approved')
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+      .get() as DevTask | undefined;
+    if (!task) return null;
+    const stage: DevTaskStage = task.status === 'spec_approved' ? 'implementing' : 'diagnosing';
+    const started = nowSec();
+    db.prepare(`UPDATE dev_tasks SET status = 'running', stage = ?, started_at = ? WHERE id = ?`).run(
+      stage,
+      started,
+      task.id,
+    );
+    return { ...task, status: 'running' as const, stage, started_at: started };
+  });
+  return txn();
+}
+
+/** Update the display-only progress sub-state while running. */
+export function setDevTaskStage(id: string, stage: DevTaskStage): void {
+  db.prepare('UPDATE dev_tasks SET stage = ? WHERE id = ?').run(stage, id);
+}
+
+/** Park the task at the human-approval gate with its drafted spec. */
+export function setDevTaskSpecDrafted(id: string, specMd: string): void {
+  db.prepare(
+    `UPDATE dev_tasks SET status = 'spec_drafted', spec_md = ?, stage = NULL WHERE id = ?`,
+  ).run(specMd, id);
+}
+
+/**
+ * Human gate: approve. CAS-guarded on spec_drafted so a stale tab / double
+ * click / interleaved POST cannot approve an already-resolved task. Returns
+ * the changed-row count (0 → API 409).
+ */
+export function approveDevTask(id: string): number {
+  return db
+    .prepare(
+      `UPDATE dev_tasks SET status = 'spec_approved', stage_checkpoint = 'spec_approved'
+       WHERE id = ? AND status = 'spec_drafted'`,
+    )
+    .run(id).changes;
+}
+
+/** Human gate: request changes → back to queued, carrying the notes. CAS. */
+export function requestChangesDevTask(id: string, notes: string): number {
+  return db
+    .prepare(
+      `UPDATE dev_tasks SET status = 'queued', review_notes = ?
+       WHERE id = ? AND status = 'spec_drafted'`,
+    )
+    .run(notes, id).changes;
+}
+
+/** Human gate: reject (terminal decline, NOT an agent give-up). CAS. */
+export function rejectDevTask(id: string): number {
+  return db
+    .prepare(
+      `UPDATE dev_tasks SET status = 'rejected', completed_at = ?
+       WHERE id = ? AND status = 'spec_drafted'`,
+    )
+    .run(nowSec(), id).changes;
+}
+
+/**
+ * Explicit terminal write (parent-owned, before worktree teardown):
+ * pr_open + pr_url, stuck + error, or cancelled (off-switch reconcile).
+ */
+export function completeDevTask(
+  id: string,
+  status: DevTaskTerminal,
+  prUrl?: string | null,
+  error?: string | null,
+): void {
+  db.prepare(
+    `UPDATE dev_tasks SET status = ?, pr_url = ?, error = ?, completed_at = ? WHERE id = ?`,
+  ).run(status, prUrl ?? null, error ?? null, nowSec(), id);
+}
+
+/** Persist the worktree path/branch the moment it is created. */
+export function setDevTaskWorktree(id: string, worktreePath: string, branch: string): void {
+  db.prepare('UPDATE dev_tasks SET worktree_path = ?, branch = ? WHERE id = ?').run(
+    worktreePath,
+    branch,
+    id,
+  );
+}
+
+/** Terminal rows that still hold a worktree — the per-tick sweep targets. */
+export function getTerminalDevTasksWithWorktree(): DevTask[] {
+  return db
+    .prepare(
+      `SELECT * FROM dev_tasks
+       WHERE status IN ('pr_open', 'stuck', 'rejected', 'cancelled')
+         AND worktree_path IS NOT NULL`,
+    )
+    .all() as DevTask[];
+}
+
+/** Null the worktree path/branch after a successful sweep teardown. */
+export function clearDevTaskWorktree(id: string): void {
+  db.prepare('UPDATE dev_tasks SET worktree_path = NULL, branch = NULL WHERE id = ?').run(id);
+}
+
+export function incrementDevTaskReviewRounds(id: string): void {
+  db.prepare('UPDATE dev_tasks SET review_rounds = review_rounds + 1 WHERE id = ?').run(id);
+}
+
+/** Accumulate total spend monotonically (preserved across restart). */
+export function addDevTaskCost(id: string, deltaUsd: number): void {
+  db.prepare('UPDATE dev_tasks SET cost_usd = cost_usd + ? WHERE id = ?').run(deltaUsd, id);
+}
+
+/**
+ * Startup recovery: reset only rows crashed mid-work (status='running') to
+ * their checkpoint, clear the stage, and restart the review counter (a fresh
+ * worktree restarts the ≤3 loop), while PRESERVING cost_usd (sunk/total spend
+ * stays visible). spec_drafted (human pause), spec_approved (already
+ * claimable), and terminals are left untouched. Returns the reset count.
+ */
+export function resetStuckDevTasks(): number {
+  return db
+    .prepare(
+      `UPDATE dev_tasks
+       SET status = CASE WHEN stage_checkpoint = 'spec_approved' THEN 'spec_approved' ELSE 'queued' END,
+           stage = NULL,
+           started_at = NULL,
+           review_rounds = 0
+       WHERE status = 'running'`,
+    )
+    .run().changes;
+}
+
 // ── Meet Sessions (Pika video meeting skill) ────────────────────────
 
 export type MeetProvider = 'pika' | 'recall' | 'daily';
