@@ -10,6 +10,7 @@ import {
   swapLabel,
   commentOnIssue,
   pushBranch,
+  getIssueLabels,
   type Exec,
   type ExecResult,
 } from '../gh.js';
@@ -176,5 +177,35 @@ describe('pushBranch', () => {
     await expect(pushBranch('/repo/dir', 'agent/issue-9', exec)).rejects.toThrow(
       /non-fast-forward/,
     );
+  });
+});
+
+describe('getIssueLabels', () => {
+  it('returns the live label names for an issue', async () => {
+    const exec = stubExec({
+      code: 0,
+      stdout: JSON.stringify({ labels: [{ name: 'agent:queue' }, { name: 'type:bug' }, { name: 'priority:p3' }] }),
+    });
+    const labels = await getIssueLabels('owner/repo', 42, exec);
+    expect(labels).toEqual(['agent:queue', 'type:bug', 'priority:p3']);
+    expect(exec).toHaveBeenCalledWith('gh', [
+      'issue',
+      'view',
+      '42',
+      '--repo',
+      'owner/repo',
+      '--json',
+      'labels',
+    ]);
+  });
+
+  it('returns an empty array when the issue has no labels', async () => {
+    const exec = stubExec({ code: 0, stdout: JSON.stringify({ labels: [] }) });
+    expect(await getIssueLabels('owner/repo', 7, exec)).toEqual([]);
+  });
+
+  it('throws with stderr on a non-zero exit', async () => {
+    const exec = stubExec({ code: 1, stderr: 'could not resolve issue' });
+    await expect(getIssueLabels('owner/repo', 7, exec)).rejects.toThrow(/could not resolve issue/);
   });
 });

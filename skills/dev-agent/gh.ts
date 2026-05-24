@@ -153,6 +153,26 @@ export async function listQueuedIssues(repo: string, exec: Exec): Promise<Queued
   return raw.map((i) => ({ number: i.number, title: i.title }));
 }
 
+/**
+ * Read an issue's live label names. The claim-time off-switch reconcile uses
+ * this to confirm `agent:queue` is still present before any work runs, so
+ * pulling the label aborts a not-yet-started task.
+ */
+export async function getIssueLabels(repo: string, issue: number, exec: Exec): Promise<string[]> {
+  const { stdout, stderr, code } = await exec('gh', [
+    'issue',
+    'view',
+    String(issue),
+    '--repo',
+    repo,
+    '--json',
+    'labels',
+  ]);
+  if (code !== 0) throw new Error(`gh issue view failed: ${stderr.trim()}`);
+  const parsed = JSON.parse(stdout || '{}') as { labels?: Array<{ name: string }> };
+  return (parsed.labels ?? []).map((l) => l.name);
+}
+
 /** Remove and/or add labels on an issue in a single `gh issue edit`. */
 export async function swapLabel(
   repo: string,

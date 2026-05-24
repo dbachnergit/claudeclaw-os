@@ -40,8 +40,12 @@ export interface DevRunResult {
   usage: { totalCostUsd: number } | null;
 }
 
-/** The worktree-bound dev runner (makeDevRunAgent output), injected. */
-export type DevRunAgent = (prompt: string) => Promise<DevRunResult>;
+/**
+ * The worktree-bound dev runner (makeDevRunAgent output), injected. The
+ * abortController is forwarded so a wall-clock budget abort kills the in-flight
+ * SDK subprocess, not just the next parent shell-out.
+ */
+export type DevRunAgent = (prompt: string, abortController?: AbortController) => Promise<DevRunResult>;
 
 /** The subset of src/db.ts helpers the workflow writes through (injected). */
 export interface WorkflowDb {
@@ -215,7 +219,7 @@ export async function runWorkflow({
 
   async function runStage(prompt: string, stuckAt: DevStage): Promise<DevRunResult> {
     consumeStage(stuckAt);
-    const r = await runAgent(prompt);
+    const r = await runAgent(prompt, abortController);
     db.addDevTaskCost(task.id, r.usage?.totalCostUsd ?? 0);
     lastAgentText = r.text;
     return r;
