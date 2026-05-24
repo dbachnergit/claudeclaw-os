@@ -24,7 +24,9 @@ vi.mock('./logger.js', () => ({
   },
 }));
 
-import { runAgentWithRetry } from './agent.js';
+import fs from 'fs';
+import { runAgent, runAgentWithRetry } from './agent.js';
+import type { RunAgentOptions } from './agent.js';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -201,4 +203,192 @@ describe('runAgentWithRetry', () => {
     expect(capturedModels[0]).toBe('claude-opus-4-6');
     expect(capturedModels[1]).toBe('claude-sonnet-4-6');
   }, 15000);
+});
+
+// ── Task 5.8a runAgent options seam ─────────────────────────────────
+// The dev agent runs inside a per-issue worktree with appended dev
+// instructions and a hard tool policy. These tests prove the OPTIONS are
+// WIRED into query() (not that the OS actually denies egress; that proof
+// is the Task 5.14 integration smoke test, per the PRD honesty note).
+
+const HOME = process.env.HOME ?? '/tmp';
+
+/** Capture the single `options` object handed to query(). */
+function captureQueryOptions(): { get: () => Record<string, unknown> } {
+  let captured: Record<string, unknown> = {};
+  mockQuery.mockImplementation((arg: unknown) => {
+    captured = ((arg as Record<string, unknown>)?.options ?? {}) as Record<string, unknown>;
+    return mockQueryEvents([
+      { type: 'system', subtype: 'init', session_id: 'sess-dev' },
+      resultEvent('done'),
+    ])();
+  });
+  return { get: () => captured };
+}
+
+/** Invoke the registered PreToolUse hook with a synthetic tool call. */
+async function callHook(
+  opts: Record<string, unknown>,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+): Promise<{ permissionDecision?: string }> {
+  const hooks = opts.hooks as
+    | { PreToolUse?: Array<{ hooks: Array<(i: unknown, id: string, o: { signal: AbortSignal }) => Promise<unknown>> }> }
+    | undefined;
+  const cb = hooks?.PreToolUse?.[0]?.hooks?.[0];
+  if (!cb) throw new Error('no PreToolUse hook registered');
+  const out = (await cb(
+    { hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput, tool_use_id: 't1' },
+    't1',
+    { signal: new AbortController().signal },
+  )) as { hookSpecificOutput?: { permissionDecision?: string } };
+  return { permissionDecision: out.hookSpecificOutput?.permissionDecision };
+}
+
+const WORKTREE = '/tmp/ps-agent-worktrees/issue-42';
+
+const DEV_OPTIONS: RunAgentOptions = {
+  cwd: WORKTREE,
+  appendInstructions: 'You are the dev agent. Never push.',
+  mcpAllowlist: ['XcodeBuildMCP'],
+  mcpToolAllowlist: [
+    'mcp__XcodeBuildMCP__build_sim',
+    'mcp__XcodeBuildMCP__test_sim',
+    'mcp__XcodeBuildMCP__list_schemes',
+    'mcp__XcodeBuildMCP__show_build_settings',
+  ],
+  nativeToolPolicy: {
+    baseTools: ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'TodoWrite'],
+    disallowedTools: ['WebFetch', 'WebSearch'],
+    deniedBashPatterns: ['git push', 'git remote', 'gh pr', 'gh issue', 'gh repo', 'gh api -X', 'gh api --method'],
+    network: { allowManagedDomainsOnly: true, allowLocalBinding: true },
+  },
+  fsPolicy: {
+    allowedRoots: [WORKTREE],
+    deniedReadGlobs: ['**/.env*', '**/.ssh/**', '**/.aws/**', '**/.config/**', '**/.claude/**'],
+  },
+};
+
+function runDev(options: RunAgentOptions) {
+  return runAgent('fix the bug', undefined, noop, undefined, 'claude-opus-4-7', undefined, undefined, undefined, options);
+}
+
+describe('runAgent options seam (Task 5.8a)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  it('routes cwd into query() so file ops land in the worktree', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect(opts.get().cwd).toBe(WORKTREE);
+  });
+
+  it('appends dev instructions as a claude_code preset system prompt', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect(opts.get().systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: 'You are the dev agent. Never push.',
+    });
+  });
+
+  it('bounds the native tool set via SDK tools + disallowedTools (not allowedTools)', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect(opts.get().tools).toEqual(['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob', 'TodoWrite']);
+    expect(opts.get().disallowedTools).toEqual(['WebFetch', 'WebSearch']);
+    // allowedTools is auto-approve-only and must NOT be used to bound the set
+    expect(opts.get().allowedTools).toBeUndefined();
+  });
+
+  it('wires network egress confinement into sandbox.network', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    const sandbox = opts.get().sandbox as { network?: Record<string, unknown> };
+    expect(sandbox.network?.allowManagedDomainsOnly).toBe(true);
+    expect(sandbox.network?.allowLocalBinding).toBe(true);
+  });
+
+  it('wires filesystem confinement into sandbox.filesystem', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    const sandbox = opts.get().sandbox as { enabled?: boolean; filesystem?: Record<string, unknown> };
+    expect(sandbox.enabled).toBe(true);
+    expect(sandbox.filesystem?.allowWrite).toEqual([WORKTREE]);
+    expect(sandbox.filesystem?.denyRead).toEqual(DEV_OPTIONS.fsPolicy!.deniedReadGlobs);
+  });
+
+  it('PreToolUse hook denies remote-mutating Bash commands', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect((await callHook(opts.get(), 'Bash', { command: 'git push origin main' })).permissionDecision).toBe('deny');
+    expect((await callHook(opts.get(), 'Bash', { command: 'gh pr create --draft' })).permissionDecision).toBe('deny');
+    expect((await callHook(opts.get(), 'Bash', { command: 'git remote add x y' })).permissionDecision).toBe('deny');
+  });
+
+  it('PreToolUse hook allows ordinary local Bash', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect((await callHook(opts.get(), 'Bash', { command: 'git commit -m wip' })).permissionDecision).not.toBe('deny');
+  });
+
+  it('PreToolUse hook denies reads outside the worktree and of secret dotfiles', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect((await callHook(opts.get(), 'Read', { file_path: `${HOME}/Projects/PatientScribe-AI-OS/.env` })).permissionDecision).toBe('deny');
+    expect((await callHook(opts.get(), 'Bash', { command: 'cat ../.env' })).permissionDecision).toBe('deny');
+    expect((await callHook(opts.get(), 'Bash', { command: 'cat ~/.ssh/id_rsa' })).permissionDecision).toBe('deny');
+    expect((await callHook(opts.get(), 'Read', { file_path: '/etc/passwd' })).permissionDecision).toBe('deny');
+  });
+
+  it('PreToolUse hook allows reads and writes inside the worktree', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect((await callHook(opts.get(), 'Read', { file_path: `${WORKTREE}/src/Foo.swift` })).permissionDecision).not.toBe('deny');
+    expect((await callHook(opts.get(), 'Write', { file_path: `${WORKTREE}/Tests/FooTests.swift` })).permissionDecision).not.toBe('deny');
+  });
+
+  it('PreToolUse hook denies MCP tools not in the allowlist, allows build tools', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect((await callHook(opts.get(), 'mcp__XcodeBuildMCP__screenshot', {})).permissionDecision).toBe('deny');
+    expect((await callHook(opts.get(), 'mcp__XcodeBuildMCP__debug_attach_sim', {})).permissionDecision).toBe('deny');
+    expect((await callHook(opts.get(), 'mcp__XcodeBuildMCP__build_sim', { projectPath: `${WORKTREE}/App.xcodeproj` })).permissionDecision).not.toBe('deny');
+  });
+
+  it('PreToolUse hook denies allowed MCP calls whose path args escape the worktree', async () => {
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    expect((await callHook(opts.get(), 'mcp__XcodeBuildMCP__build_sim', { projectPath: '/Users/someone/Other/App.xcodeproj' })).permissionDecision).toBe('deny');
+  });
+
+  it('mcpAllowlist filters the loaded MCP server set to the allowlist', async () => {
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(
+      JSON.stringify({
+        mcpServers: {
+          XcodeBuildMCP: { command: 'xcodebuildmcp' },
+          SomeOtherServer: { command: 'other' },
+        },
+      }),
+    );
+    const opts = captureQueryOptions();
+    await runDev(DEV_OPTIONS);
+    const servers = opts.get().mcpServers as Record<string, unknown> | undefined;
+    expect(servers).toBeDefined();
+    expect(Object.keys(servers!)).toEqual(['XcodeBuildMCP']);
+  });
+
+  it('omitting options preserves current behavior (no sandbox/hooks/tool bound)', async () => {
+    const opts = captureQueryOptions();
+    await runAgentWithRetry('hi', undefined, noop);
+    expect(opts.get().cwd).toBe('/tmp/test'); // PROJECT_ROOT fallback
+    expect(opts.get().sandbox).toBeUndefined();
+    expect(opts.get().hooks).toBeUndefined();
+    expect(opts.get().tools).toBeUndefined();
+    expect(opts.get().disallowedTools).toBeUndefined();
+    expect(opts.get().systemPrompt).toBeUndefined();
+  });
 });

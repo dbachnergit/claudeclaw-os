@@ -2,6 +2,12 @@ import fs from 'fs';
 import path from 'path';
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  HookCallback,
+  HookInput,
+  HookJSONOutput,
+  SandboxSettings,
+} from '@anthropic-ai/claude-agent-sdk';
 
 import { AGENT_MAX_TURNS, PROJECT_ROOT, agentCwd } from './config.js';
 import { readEnvFile } from './env.js';
@@ -73,6 +79,59 @@ export function loadMcpServers(allowlist?: string[], projectCwd?: string): Recor
   }
 
   return merged;
+}
+
+// ── Dev-agent tool policy (Task 5.8a) ───────────────────────────────
+// These types carry the dev subprocess's confinement policy from the
+// caller (skills/dev-agent makeDevRunAgent) into the SDK query(). They are
+// additive: existing callers omit `options` and behavior is unchanged.
+
+/**
+ * Filesystem confinement for the subprocess. `cwd` alone is NOT a sandbox
+ * (a prompt-injected agent can still Read/cat absolute paths), so we feed
+ * these to the SDK sandbox AND to the PreToolUse path guard.
+ */
+export interface FsConfinementPolicy {
+  /** Absolute roots the subprocess may read/write under (the worktree). */
+  allowedRoots: string[];
+  /** Glob patterns that are always denied (e.g. `**\/.env*`, `**\/.ssh/**`). */
+  deniedReadGlobs: string[];
+}
+
+/**
+ * SDK native-tool policy. Under `bypassPermissions` the live tool-level
+ * controls are `tools`/`disallowedTools` (bound the set) plus a PreToolUse
+ * deny hook (block remote-mutating Bash command strings); `network` maps to
+ * the OS-level sandbox.network egress block.
+ */
+export interface NativeToolPolicy {
+  /** Base built-in tool set → SDK `tools` (NOT `allowedTools`, which is auto-approve-only). */
+  baseTools?: string[];
+  /** Tools removed from the model's context entirely → SDK `disallowedTools`. */
+  disallowedTools?: string[];
+  /** Bash command substrings that the PreToolUse hook denies. */
+  deniedBashPatterns: string[];
+  /** OS-level network egress confinement → sandbox.network. */
+  network?: {
+    allowManagedDomainsOnly?: boolean;
+    allowLocalBinding?: boolean;
+  };
+}
+
+/**
+ * Additive options seam for `runAgent`. Carries the worktree cwd, appended
+ * dev instructions, the two tool policies (MCP-server + native), and the
+ * filesystem confinement. Omitted by every existing caller.
+ */
+export interface RunAgentOptions {
+  cwd?: string;
+  appendInstructions?: string;
+  /** MCP server names to load (server-level; feeds loadMcpServers). */
+  mcpAllowlist?: string[];
+  /** Fully-qualified `mcp__*` tool names the PreToolUse hook permits. */
+  mcpToolAllowlist?: string[];
+  nativeToolPolicy?: NativeToolPolicy;
+  fsPolicy?: FsConfinementPolicy;
 }
 
 export interface UsageInfo {
@@ -156,6 +215,139 @@ async function* singleTurn(text: string): AsyncGenerator<{
   };
 }
 
+// ── Dev-agent confinement enforcement (Task 5.8a) ───────────────────
+// Helpers backing the PreToolUse hook and sandbox wiring. Pure, no I/O.
+
+/** Path-shaped argument keys on MCP (XcodeBuildMCP) tool calls. */
+const MCP_PATH_ARG_KEYS = [
+  'projectPath',
+  'workspacePath',
+  'derivedDataPath',
+  'outputPath',
+  'resultBundlePath',
+  'path',
+  'file_path',
+];
+
+/**
+ * Compile a glob (`**` crosses separators, `*` stays within a segment) to a
+ * RegExp that matches anywhere in a path or command string. Used for the
+ * secret-dotfile deny globs (`**\/.env*`, `**\/.ssh/**`, ...).
+ */
+function globToRegExp(glob: string): RegExp {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        re += '.*';
+        i++;
+        if (glob[i + 1] === '/') i++;
+      } else {
+        re += '[^/]*';
+      }
+    } else if (c === '?') {
+      re += '[^/]';
+    } else if ('.+^${}()|[]\\'.includes(c)) {
+      re += `\\${c}`;
+    } else {
+      re += c;
+    }
+  }
+  return new RegExp(`(^|/)${re}$`);
+}
+
+function matchesAnyGlob(s: string, globs: string[]): boolean {
+  return globs.some((g) => globToRegExp(g).test(s));
+}
+
+/** True if `target` resolves to, or under, one of the allowed roots. */
+function isUnderRoots(target: string, roots: string[]): boolean {
+  const resolved = path.resolve(target);
+  return roots.some((r) => {
+    const root = path.resolve(r);
+    return resolved === root || resolved.startsWith(root + path.sep);
+  });
+}
+
+interface PreToolUsePolicy {
+  deniedBashPatterns?: string[];
+  allowedRoots?: string[];
+  deniedReadGlobs?: string[];
+  mcpToolAllowlist?: string[];
+}
+
+/**
+ * Build the dev subprocess's PreToolUse deny hook. Fires regardless of
+ * `permissionMode` (unlike `canUseTool` under bypassPermissions), so this is
+ * the live tool-level control:
+ *  - MCP tools must be in the allowlist; their path args must stay in-tree.
+ *  - Bash command strings matching a remote-mutating pattern (or referencing
+ *    a denied path) are blocked.
+ *  - Read/Edit/Write outside the worktree, or of a secret dotfile, are blocked.
+ */
+function makePreToolUseHook(policy: PreToolUsePolicy): HookCallback {
+  const deny = (reason: string): HookJSONOutput => ({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: reason,
+    },
+  });
+  const allow: HookJSONOutput = { continue: true };
+
+  return async (input: HookInput): Promise<HookJSONOutput> => {
+    const toolName = (input as { tool_name?: string }).tool_name ?? '';
+    const toolInput = ((input as { tool_input?: unknown }).tool_input ?? {}) as Record<string, unknown>;
+
+    if (toolName.startsWith('mcp__')) {
+      if (policy.mcpToolAllowlist && !policy.mcpToolAllowlist.includes(toolName)) {
+        return deny(`MCP tool ${toolName} is not in the dev allowlist`);
+      }
+      if (policy.allowedRoots) {
+        for (const key of MCP_PATH_ARG_KEYS) {
+          const v = toolInput[key];
+          if (typeof v === 'string' && v.length > 0 && !isUnderRoots(v, policy.allowedRoots)) {
+            return deny(`MCP arg ${key} resolves outside the worktree`);
+          }
+        }
+      }
+      return allow;
+    }
+
+    if (toolName === 'Bash') {
+      const cmd = typeof toolInput.command === 'string' ? toolInput.command : '';
+      if (policy.deniedBashPatterns?.some((p) => cmd.includes(p))) {
+        return deny('Bash command matches a denied (remote-mutating) pattern');
+      }
+      if (policy.deniedReadGlobs && matchesAnyGlob(cmd, policy.deniedReadGlobs)) {
+        return deny('Bash command references a denied path');
+      }
+      return allow;
+    }
+
+    if (toolName === 'Read' || toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
+      const raw = typeof toolInput.file_path === 'string'
+        ? toolInput.file_path
+        : typeof toolInput.path === 'string'
+          ? toolInput.path
+          : '';
+      if (raw) {
+        const abs = path.resolve(raw);
+        if (policy.deniedReadGlobs && matchesAnyGlob(abs, policy.deniedReadGlobs)) {
+          return deny(`Path ${raw} matches a denied glob`);
+        }
+        if (policy.allowedRoots && !isUnderRoots(abs, policy.allowedRoots)) {
+          return deny(`Path ${raw} is outside the worktree`);
+        }
+      }
+      return allow;
+    }
+
+    return allow;
+  };
+}
+
 /**
  * Run a single user message through Claude Code and return the result.
  *
@@ -181,6 +373,7 @@ export async function runAgent(
   abortController?: AbortController,
   onStreamText?: (accumulatedText: string) => void,
   mcpAllowlist?: string[],
+  options?: RunAgentOptions,
 ): Promise<AgentResult> {
   // Centralized kill-switch enforcement. Throws KillSwitchDisabledError if
   // LLM_SPAWN_ENABLED has been flipped off — caller is expected to surface
@@ -213,9 +406,50 @@ export async function runAgent(
   // Telegram's "typing..." action expires after ~5s.
   const typingInterval = setInterval(onTyping, 4000);
 
+  // Dev-agent seam (Task 5.8a). The options object (when present) carries the
+  // worktree cwd, appended dev instructions, and the tool/filesystem policy.
+  // Existing callers pass nothing, so every derived value is inert for them.
+  const effectiveCwd = options?.cwd ?? agentCwd ?? PROJECT_ROOT;
+  const effectiveMcpAllowlist = options?.mcpAllowlist ?? mcpAllowlist;
+
+  const fsPolicy = options?.fsPolicy;
+  const netPolicy = options?.nativeToolPolicy?.network;
+  let sandbox: SandboxSettings | undefined;
+  if (fsPolicy || netPolicy) {
+    sandbox = {
+      enabled: true,
+      ...(fsPolicy
+        ? { filesystem: { allowWrite: fsPolicy.allowedRoots, denyRead: fsPolicy.deniedReadGlobs } }
+        : {}),
+      ...(netPolicy
+        ? {
+            network: {
+              ...(netPolicy.allowManagedDomainsOnly !== undefined
+                ? { allowManagedDomainsOnly: netPolicy.allowManagedDomainsOnly }
+                : {}),
+              ...(netPolicy.allowLocalBinding !== undefined
+                ? { allowLocalBinding: netPolicy.allowLocalBinding }
+                : {}),
+            },
+          }
+        : {}),
+    };
+  }
+
+  const preToolUseHook =
+    options?.nativeToolPolicy || options?.fsPolicy || options?.mcpToolAllowlist
+      ? makePreToolUseHook({
+          deniedBashPatterns: options.nativeToolPolicy?.deniedBashPatterns,
+          allowedRoots: options.fsPolicy?.allowedRoots,
+          deniedReadGlobs: options.fsPolicy?.deniedReadGlobs,
+          mcpToolAllowlist: options.mcpToolAllowlist,
+        })
+      : undefined;
+
   try {
-    // Load MCP servers from project + user settings files, filtered by agent allowlist
-    const mcpServers = loadMcpServers(mcpAllowlist);
+    // Load MCP servers from project + user settings files, filtered by agent
+    // allowlist. The dev seam targets the worktree's .claude/settings.json via cwd.
+    const mcpServers = loadMcpServers(effectiveMcpAllowlist, options?.cwd);
     const mcpServerNames = Object.keys(mcpServers);
     logger.info(
       { sessionId: sessionId ?? 'new', messageLen: message.length, mcpServers: mcpServerNames },
@@ -228,15 +462,33 @@ export async function runAgent(
     for await (const event of query({
       prompt: singleTurn(message),
       options: {
-        // cwd = agent directory (if running as agent) or project root.
+        // cwd = dev worktree (seam) > agent directory > project root.
         // Claude Code loads CLAUDE.md from cwd via settingSources: ['project'].
-        cwd: agentCwd ?? PROJECT_ROOT,
+        cwd: effectiveCwd,
 
         // Resume the previous session for this chat (persistent context)
         resume: sessionId,
 
         // 'project' loads CLAUDE.md from cwd; 'user' loads ~/.claude/skills/ and user settings
         settingSources: ['project', 'user'],
+
+        // Dev seam: append the dev personality to the claude_code preset prompt.
+        ...(options?.appendInstructions
+          ? { systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: options.appendInstructions } }
+          : {}),
+
+        // Dev seam: bound the native tool set. `tools` restricts WHICH tools
+        // exist; `disallowedTools` removes them from context. `allowedTools` is
+        // auto-approve-only and is deliberately NOT used here.
+        ...(options?.nativeToolPolicy?.baseTools ? { tools: options.nativeToolPolicy.baseTools } : {}),
+        ...(options?.nativeToolPolicy?.disallowedTools ? { disallowedTools: options.nativeToolPolicy.disallowedTools } : {}),
+
+        // Dev seam: OS-level filesystem + network isolation for spawned Bash.
+        ...(sandbox ? { sandbox } : {}),
+
+        // Dev seam: PreToolUse deny hook (remote-mutating Bash, out-of-tree
+        // reads/writes, non-allowlisted MCP tools). Fires under bypassPermissions.
+        ...(preToolUseHook ? { hooks: { PreToolUse: [{ hooks: [preToolUseHook] }] } } : {}),
 
         // Skip all permission prompts — this is a trusted personal bot on your own machine
         permissionMode: 'bypassPermissions',
