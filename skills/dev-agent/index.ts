@@ -45,6 +45,14 @@ export type { DevAgentConfig } from './workflow.js';
 // can pass the full id because it calls the Anthropic API directly, not the CLI.
 // Verified live during Phase 5 Task 5.14.
 const DEV_MODEL = 'opus';
+
+// Per-call SDK turn budget for the dev runner, overriding the global
+// AGENT_MAX_TURNS (default 30, tuned for short Telegram replies). A dev stage
+// (diagnose, implement, review) must read many files, run tests, and iterate,
+// so 30 turns is exhausted mid-diagnosis and returns no text (error_max_turns,
+// observed live in Task 5.14). The wall-clock and stage budgets still bound the
+// total work; this only lifts the per-stage turn ceiling.
+const DEV_MAX_TURNS = 200;
 const NOOP = (): void => {};
 
 /** Default budget: 90-min wall clock + a generous stage cap. */
@@ -72,6 +80,7 @@ export interface DevAgentRunOptions {
     network?: { allowManagedDomainsOnly?: boolean; allowLocalBinding?: boolean };
   };
   fsPolicy?: { allowedRoots: string[]; deniedReadGlobs: string[] };
+  maxTurns?: number;
 }
 
 /** The injected base runner (src/agent.ts runAgent), restated structurally. */
@@ -160,6 +169,7 @@ export function makeDevRunAgent(baseRunAgent: BaseRunAgent, worktreePath: string
       network: policy.network,
     },
     fsPolicy: { allowedRoots: [worktreePath], deniedReadGlobs: policy.deniedReadGlobs },
+    maxTurns: DEV_MAX_TURNS,
   };
 
   return async (prompt, abortController) => {

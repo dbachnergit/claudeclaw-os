@@ -126,6 +126,22 @@ describe('runWorkflow', () => {
     expect(deps.openPr).not.toHaveBeenCalled();
   });
 
+  it('gives up as stuck when the diagnose returns no text (turn budget exhausted), never parking an empty spec', async () => {
+    const task = claimQueued(209);
+    const deps = makeDeps({
+      runAgent: vi.fn(async () => ({ text: '', usage: { totalCostUsd: 3.3 } })),
+    });
+
+    const result = await runWorkflow({ task, config: CONFIG, abortController: new AbortController(), budget: BUDGET, ...deps });
+
+    expect(result).toBe('stuck');
+    const row = getDevTaskById('d209')!;
+    expect(row.status).toBe('stuck');
+    expect(row.spec_md).toBeNull(); // never parked an empty spec
+    expect(deps.giveUp).toHaveBeenCalledTimes(1);
+    expect(deps.openPr).not.toHaveBeenCalled();
+  });
+
   it('spec_approved-origin claim reaches pr_open through review, verify, and the evidence gate', async () => {
     const task = claimApproved(202, 'Fix the crash.');
     const deps = makeDeps();

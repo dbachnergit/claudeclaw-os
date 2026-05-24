@@ -158,6 +158,9 @@ describe('processDevQueue', () => {
           network: expect.objectContaining({ allowManagedDomainsOnly: true }),
         }),
         fsPolicy: expect.objectContaining({ allowedRoots: ['/wt-root/issue-302'] }),
+        // Dev stages need far more SDK turns than the global default, or the
+        // diagnose exhausts the budget and returns no spec (Task 5.14).
+        maxTurns: 200,
       }),
     );
   });

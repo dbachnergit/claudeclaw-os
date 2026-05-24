@@ -235,7 +235,13 @@ export async function runWorkflow({
     // ── Diagnose stage (queued-origin claim) ────────────────────────
     if (task.stage === 'diagnosing') {
       const r = await runStage(diagnosePrompt(task), 'diagnosing');
-      db.setDevTaskSpecDrafted(task.id, r.text ?? '');
+      // Fail loud: an empty diagnosis (the agent hit its turn budget, refused,
+      // or returned no text) must not park an empty spec for human approval.
+      // Give up so it surfaces as stuck instead of an approvable blank spec.
+      if (!r.text || !r.text.trim()) {
+        throw new GiveUpError('diagnose produced no spec (empty or turn-budget exhausted)', 'diagnosing');
+      }
+      db.setDevTaskSpecDrafted(task.id, r.text);
       return 'spec_drafted';
     }
 

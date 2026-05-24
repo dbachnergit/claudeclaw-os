@@ -132,6 +132,13 @@ export interface RunAgentOptions {
   mcpToolAllowlist?: string[];
   nativeToolPolicy?: NativeToolPolicy;
   fsPolicy?: FsConfinementPolicy;
+  /**
+   * Per-call SDK turn budget, overriding the global AGENT_MAX_TURNS. The dev
+   * agent needs many more turns than a Telegram reply to explore a codebase and
+   * write a spec; without this the diagnose exhausts the 30-turn default and
+   * returns no text (error_max_turns).
+   */
+  maxTurns?: number;
 }
 
 export interface UsageInfo {
@@ -496,7 +503,9 @@ export async function runAgent(
 
         // Cap agentic turns to prevent runaway tool-use loops (e.g. retrying
         // stale cookies 40+ times). Configurable via AGENT_MAX_TURNS in .env.
-        ...(AGENT_MAX_TURNS > 0 ? { maxTurns: AGENT_MAX_TURNS } : {}),
+        ...((options?.maxTurns ?? AGENT_MAX_TURNS) > 0
+          ? { maxTurns: options?.maxTurns ?? AGENT_MAX_TURNS }
+          : {}),
 
         // Pass secrets to the subprocess without polluting our own process.env
         env: sdkEnv,
