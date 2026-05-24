@@ -142,7 +142,9 @@ describe('processDevQueue', () => {
       undefined,
       expect.any(Function),
       undefined,
-      'claude-opus-4-7',
+      // CLI model ALIAS, not the full id: the full id crashes the spawned
+      // claude CLI subprocess (exits non-zero), verified live in Task 5.14.
+      'opus',
       ac,
       undefined,
       undefined,

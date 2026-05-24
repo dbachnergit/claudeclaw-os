@@ -37,7 +37,14 @@ import {
 
 export type { DevAgentConfig } from './workflow.js';
 
-const DEV_MODEL = 'claude-opus-4-7';
+// Use the Claude Code CLI model ALIAS, not the full id. runAgent spawns the
+// `claude` CLI subprocess via the SDK; that subprocess rejects the full id
+// 'claude-opus-4-7' and exits non-zero even after returning a result, which
+// runAgent then classifies as a subprocess crash (so every dev run would fail).
+// The alias 'opus' (latest Opus) is accepted and exits clean. The comms path
+// can pass the full id because it calls the Anthropic API directly, not the CLI.
+// Verified live during Phase 5 Task 5.14.
+const DEV_MODEL = 'opus';
 const NOOP = (): void => {};
 
 /** Default budget: 90-min wall clock + a generous stage cap. */
