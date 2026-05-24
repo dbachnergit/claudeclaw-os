@@ -12,12 +12,21 @@
 // editing lines above an unchanged warning doesn't make it look "new".
 
 import type { Exec } from './gh.js';
+import { resolveAndBootSimulator, type ResolveBootArgs } from './sim.js';
 
 /** iOS project, relative to the worktree root (the repo's standard layout). */
 export const DEFAULT_PROJECT_PATH = 'PatientScribe/PatientScribe.xcodeproj';
 
 /** A wedged simulator/compile must abort to a give-up, not hang devBusy. */
 export const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * The test run gets a SHORTER, separate bound than the build. With parallel
+ * (clone) testing disabled and a single device pre-booted, the suite runs in
+ * well under a minute here; a much shorter cap means any residual CoreSimulator
+ * stall aborts to a give-up fast instead of wedging for the full build budget.
+ */
+export const TEST_TIMEOUT_MS = 15 * 60 * 1000;
 
 // Compiler diagnostics: "<file>:<line>[:<col>]: warning: <message>".
 const WARNING_RE = /^(.+?):\d+:(?:\d+:)?\s*warning:\s*(.+)$/;
@@ -92,12 +101,25 @@ export interface RunBuildVerifyArgs {
   exec: Exec;
   signal?: AbortSignal;
   projectPath?: string;
+  /**
+   * Resolve+boot the simulator and return an `id=<UDID>` destination. Injectable
+   * for tests; defaults to the real sim.ts resolver. Idempotent across the
+   * two-strike retry (an already-booted device is a no-op).
+   */
+  resolveSim?: (args: ResolveBootArgs) => Promise<string>;
 }
 
 /**
  * Parent-owned gate: scheme-scoped `xcodebuild build` then `xcodebuild test`
- * in the worktree, bounded by BUILD_TIMEOUT_MS and abortable via `signal`. A
- * failed build short-circuits the (slow) test run.
+ * in the worktree, abortable via `signal`. A failed build short-circuits the
+ * (slow) test run.
+ *
+ * The configured by-name destination is first resolved to a single, pre-booted
+ * device targeted by `id=<UDID>`, and parallel (clone) testing is disabled. That
+ * combination is the fix for the live hang: `xcodebuild test` against a by-name,
+ * parallelizable scheme tries to clone+cold-boot simulators itself, and that
+ * clone-boot path stalls under the headless launchd daemon context. The build
+ * keeps BUILD_TIMEOUT_MS; the test gets the shorter TEST_TIMEOUT_MS.
  */
 export async function runBuildVerify({
   worktreePath,
@@ -107,11 +129,17 @@ export async function runBuildVerify({
   exec,
   signal,
   projectPath = DEFAULT_PROJECT_PATH,
+  resolveSim = resolveAndBootSimulator,
 }: RunBuildVerifyArgs): Promise<BuildVerifyResult> {
-  const opts = { cwd: worktreePath, timeoutMs: BUILD_TIMEOUT_MS, signal };
-  const baseArgs = ['-project', projectPath, '-scheme', scheme, '-destination', simDestination];
+  const buildOpts = { cwd: worktreePath, timeoutMs: BUILD_TIMEOUT_MS, signal };
+  const testOpts = { cwd: worktreePath, timeoutMs: TEST_TIMEOUT_MS, signal };
 
-  const build = await exec('xcodebuild', ['build', ...baseArgs], opts);
+  // Boot ONE concrete device out-of-band and target it by id, so xcodebuild
+  // attaches to a ready device instead of cloning + cold-booting under launchd.
+  const bootedDestination = await resolveSim({ destination: simDestination, exec, signal });
+  const baseArgs = ['-project', projectPath, '-scheme', scheme, '-destination', bootedDestination];
+
+  const build = await exec('xcodebuild', ['build', ...baseArgs], buildOpts);
   if (build.code !== 0) {
     return evaluate({
       buildOutput: `${build.stdout}\n${build.stderr}`,
@@ -122,7 +150,7 @@ export async function runBuildVerify({
     });
   }
 
-  const test = await exec('xcodebuild', ['test', ...baseArgs], opts);
+  const test = await exec('xcodebuild', ['test', ...baseArgs, '-parallel-testing-enabled', 'NO'], testOpts);
   return evaluate({
     buildOutput: `${build.stdout}\n${build.stderr}`,
     buildCode: build.code,

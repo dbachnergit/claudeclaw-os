@@ -4,6 +4,8 @@ import {
   evaluate,
   runBuildVerify,
   DEFAULT_PROJECT_PATH,
+  BUILD_TIMEOUT_MS,
+  TEST_TIMEOUT_MS,
 } from '../build-verify.js';
 import type { Exec, ExecResult } from '../gh.js';
 
@@ -86,8 +88,14 @@ describe('evaluate', () => {
 });
 
 describe('runBuildVerify', () => {
-  it('shells scheme-scoped xcodebuild build then test in the worktree, threading the signal', async () => {
+  // The configured DEST is by-name; the gate resolves+boots a concrete device
+  // (sim.ts) and targets it by id, eliminating the parallel clone-boot hang.
+  const BOOTED = 'id=TEST-UDID-1';
+  const resolveStub = () => vi.fn(async () => BOOTED);
+
+  it('boots one concrete simulator and targets BOTH build and test by id, threading the signal', async () => {
     const exec = stubExec({ code: 0 });
+    const resolveSim = resolveStub();
     const ac = new AbortController();
     await runBuildVerify({
       worktreePath: WORKTREE,
@@ -96,7 +104,13 @@ describe('runBuildVerify', () => {
       baselineWarnings: new Set(),
       exec,
       signal: ac.signal,
+      resolveSim,
     });
+
+    // The by-name destination is resolved to a booted device first.
+    expect(resolveSim).toHaveBeenCalledWith(
+      expect.objectContaining({ destination: DEST, exec, signal: ac.signal }),
+    );
 
     expect(exec.mock.calls[0][0]).toBe('xcodebuild');
     expect(exec.mock.calls[0][1]).toEqual([
@@ -106,8 +120,10 @@ describe('runBuildVerify', () => {
       '-scheme',
       SCHEME,
       '-destination',
-      DEST,
+      BOOTED,
     ]);
+    // Test step targets the booted device by id AND disables parallel (clone)
+    // testing: the clones are the element that stalls under launchd.
     expect(exec.mock.calls[1][1]).toEqual([
       'test',
       '-project',
@@ -115,13 +131,30 @@ describe('runBuildVerify', () => {
       '-scheme',
       SCHEME,
       '-destination',
-      DEST,
+      BOOTED,
+      '-parallel-testing-enabled',
+      'NO',
     ]);
-    // Both run in the worktree, bounded, and abortable.
     const opts = exec.mock.calls[0][2] as { cwd?: string; timeoutMs?: number; signal?: AbortSignal };
     expect(opts.cwd).toBe(WORKTREE);
-    expect(opts.timeoutMs).toBeGreaterThan(0);
     expect(opts.signal).toBe(ac.signal);
+  });
+
+  it('bounds the test run by a SHORTER timeout than the build, so a residual stall aborts fast', async () => {
+    const exec = stubExec({ code: 0 });
+    await runBuildVerify({
+      worktreePath: WORKTREE,
+      scheme: SCHEME,
+      simDestination: DEST,
+      baselineWarnings: new Set(),
+      exec,
+      resolveSim: resolveStub(),
+    });
+    const buildOpts = exec.mock.calls[0][2] as { timeoutMs?: number };
+    const testOpts = exec.mock.calls[1][2] as { timeoutMs?: number };
+    expect(buildOpts.timeoutMs).toBe(BUILD_TIMEOUT_MS);
+    expect(testOpts.timeoutMs).toBe(TEST_TIMEOUT_MS);
+    expect(TEST_TIMEOUT_MS).toBeLessThan(BUILD_TIMEOUT_MS);
   });
 
   it('skips the test run and reports failure when the build fails', async () => {
@@ -132,6 +165,7 @@ describe('runBuildVerify', () => {
       simDestination: DEST,
       baselineWarnings: new Set(),
       exec,
+      resolveSim: resolveStub(),
     });
     expect(exec).toHaveBeenCalledTimes(1); // build only; test skipped
     expect(r.ok).toBe(false);
@@ -146,6 +180,7 @@ describe('runBuildVerify', () => {
       simDestination: DEST,
       baselineWarnings: new Set(),
       exec,
+      resolveSim: resolveStub(),
     });
     expect(r.ok).toBe(true);
   });
